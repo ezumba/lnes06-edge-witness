@@ -1298,15 +1298,50 @@ class MainActivity : FragmentActivity() {
         fun getDLTNContacts() {
             val svc = getDLTNService() ?: return
             lifecycleScope.launch(Dispatchers.IO) {
+                // The Messages CHAT list is a CONVERSATION list, not just a list of
+                // BLE-discovered peers. Merge three sources so a peer you have ever
+                // messaged or saved always appears:
+                //   1. dltn_contacts  — auto-discovered (BLE) + peers who messaged us
+                //   2. node_book      — manually saved contacts (Node Book tab)
+                //   3. message threads — anyone with messages in either direction
+                val db       = ExergyDatabase.getDatabase(this@MainActivity)
                 val contacts = svc.messenger.getAllContacts()
-                val arr = JSONArray()
+                val nodeBook = db.nodeBookDao().getAll()
+                val threads  = db.dltnMessageDao().getAllContactNodeIds()
+                val localId  = svc.messenger.localNodeId()
+
+                val aliasOf   = HashMap<String, String>()
+                val lastSeenOf = HashMap<String, Long>()
+                val rssiOf    = HashMap<String, Int>()
+                val trustedOf = HashMap<String, Boolean>()
+                val order     = LinkedHashSet<String>()
+
                 for (c in contacts) {
+                    aliasOf[c.nodeId]    = c.displayName
+                    lastSeenOf[c.nodeId] = c.lastSeenMs
+                    rssiOf[c.nodeId]     = c.rssiLast
+                    trustedOf[c.nodeId]  = c.trusted
+                    order.add(c.nodeId)
+                }
+                for (n in nodeBook) {
+                    aliasOf[n.nodeId]    = n.alias   // a saved alias always wins
+                    lastSeenOf[n.nodeId] = maxOf(lastSeenOf[n.nodeId] ?: 0L, n.lastSeen)
+                    trustedOf[n.nodeId]  = true
+                    order.add(n.nodeId)
+                }
+                for (id in threads) {
+                    if (id.isBlank() || id == localId) continue
+                    order.add(id)   // ensure messaged peers show even if not saved/discovered
+                }
+
+                val arr = JSONArray()
+                for (id in order) {
                     arr.put(JSONObject().apply {
-                        put("nodeId",      c.nodeId)
-                        put("displayName", c.displayName)
-                        put("lastSeenMs",  c.lastSeenMs)
-                        put("rssiLast",    c.rssiLast)
-                        put("trusted",     c.trusted)
+                        put("nodeId",      id)
+                        put("displayName", aliasOf[id] ?: "Node ${id.take(8)}")
+                        put("lastSeenMs",  lastSeenOf[id] ?: 0L)
+                        put("rssiLast",    rssiOf[id] ?: -100)
+                        put("trusted",     trustedOf[id] ?: false)
                     })
                 }
                 withContext(Dispatchers.Main) { callJs("onDLTNContactsLoaded", arr.toString()) }
@@ -1735,6 +1770,11 @@ class MainActivity : FragmentActivity() {
         }
 
         // Native ML Kit (Google Code Scanner) — full-screen QR scan, no custom camera UI.
+        // The scanner is an OPTIONAL Play Services module downloaded on demand; on some
+        // devices/sessions it is evicted and startScan() fails until it re-downloads.
+        // We proactively request the module install, then scan; any failure falls
+        // through to the manual paste dialog (onNodeQrScanError) so adding a contact
+        // is never blocked by Play Services.
         @JavascriptInterface
         fun scanNodeQr() {
             runOnUiThread {
@@ -1742,10 +1782,37 @@ class MainActivity : FragmentActivity() {
                     val options = GmsBarcodeScannerOptions.Builder()
                         .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
                         .build()
-                    GmsBarcodeScanning.getClient(this@MainActivity, options).startScan()
-                        .addOnSuccessListener { bc -> callJs("onNodeQrScanned", bc.rawValue ?: "") }
-                        .addOnCanceledListener { sendToLog("[QR] Scan cancelled") }
-                        .addOnFailureListener { e -> callJs("onNodeQrScanError", e.message ?: "scan failed") }
+                    val scanner = GmsBarcodeScanning.getClient(this@MainActivity, options)
+
+                    val doScan = {
+                        scanner.startScan()
+                            .addOnSuccessListener { bc -> callJs("onNodeQrScanned", bc.rawValue ?: "") }
+                            .addOnCanceledListener { sendToLog("[QR] Scan cancelled") }
+                            .addOnFailureListener { e -> callJs("onNodeQrScanError", e.message ?: "scan failed") }
+                    }
+
+                    // Ensure the scanner module is present first (downloads if evicted).
+                    try {
+                        val moduleInstall = com.google.android.gms.common.moduleinstall.ModuleInstall.getClient(this@MainActivity)
+                        moduleInstall.areModulesAvailable(scanner)
+                            .addOnSuccessListener { resp ->
+                                if (resp.areModulesAvailable()) {
+                                    doScan()
+                                } else {
+                                    val req = com.google.android.gms.common.moduleinstall.ModuleInstallRequest.newBuilder()
+                                        .addApi(scanner).build()
+                                    moduleInstall.installModules(req)
+                                        .addOnSuccessListener { doScan() }
+                                        .addOnFailureListener { e -> callJs("onNodeQrScanError", e.message ?: "scanner module unavailable") }
+                                }
+                            }
+                            .addOnFailureListener {
+                                // Availability check itself failed — just try scanning.
+                                doScan()
+                            }
+                    } catch (_: Exception) {
+                        doScan()
+                    }
                 } catch (e: Exception) {
                     callJs("onNodeQrScanError", e.message ?: "scanner unavailable")
                 }
