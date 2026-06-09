@@ -100,6 +100,9 @@ class DLTNMessenger(
         }
 
         Log.i(TAG, "[SEND] image${if (registerOnL0) "_proof" else ""} → $toNodeId queued")
+        // LNES-12 Message Hub: race the global rail. buildEnvelopeBytes inlines the
+        // JPEG, so the image reaches peers outside BLE range. Same id → dedup.
+        try { globalSend?.invoke(toNodeId, buildEnvelopeBytes(msg)) } catch (_: Exception) {}
         return msg
     }
 
@@ -166,6 +169,21 @@ class DLTNMessenger(
                 outboxPending = false,
                 replyToId     = obj.optString("reply_to").ifEmpty { null },
             )
+
+            // Image transfer: if the envelope inlined JPEG bytes, write them to a
+            // local file and keep ONLY the "dltn_img:<id>" pointer in the DB (mirrors
+            // the sender — avoids the 2 MB SQLite CursorWindow). getDLTNConversation
+            // resolves the pointer back to base64 for the WebView at query time.
+            val imgB64 = obj.optString("image_b64", "")
+            if (imgB64.isNotEmpty() && msg.content.startsWith("dltn_img:")) {
+                try {
+                    val imgId = msg.content.removePrefix("dltn_img:")
+                    val dir = java.io.File(context.filesDir, "dltn_images").apply { mkdirs() }
+                    java.io.File(dir, "$imgId.jpg").writeBytes(Base64.decode(imgB64, Base64.NO_WRAP))
+                } catch (e: Exception) {
+                    Log.w(TAG, "[RECV] image write failed: ${e.message}")
+                }
+            }
 
             db.dltnMessageDao().insert(msg)
 
@@ -297,6 +315,7 @@ class DLTNMessenger(
         )
         db.dltnMessageDao().insert(msg)
         Log.i(TAG, "[FWD] ${orig.type} → ${toNodeId.take(8)} (src ${messageId.take(8)})")
+        try { globalSend?.invoke(toNodeId, buildEnvelopeBytes(msg)) } catch (_: Exception) {}
         return msg
     }
 
@@ -347,6 +366,18 @@ class DLTNMessenger(
             // D2: ship the sender's EC public key so the receiver can verify the
             // ECDSA signature AND the node-id↔pubkey binding (no pre-shared key).
             put("public_key",   getLocalPublicKeyB64())
+            // Image transfer: the DB only stores a "dltn_img:<id>" pointer (to dodge
+            // the 2 MB SQLite CursorWindow), so inline the actual JPEG bytes here for
+            // the wire. The receiver writes them to its own dltn_images/<id>.jpg and
+            // keeps only the pointer in its DB. Works on BOTH rails (BLE chunked +
+            // global WebSocket).
+            if (msg.content.startsWith("dltn_img:")) {
+                val imgId = msg.content.removePrefix("dltn_img:")
+                val f = java.io.File(java.io.File(context.filesDir, "dltn_images"), "$imgId.jpg")
+                if (f.exists()) {
+                    put("image_b64", Base64.encodeToString(f.readBytes(), Base64.NO_WRAP))
+                }
+            }
         }
         return obj.toString().toByteArray(Charsets.UTF_8)
     }
