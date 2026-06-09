@@ -8,20 +8,25 @@ import android.net.wifi.aware.*
 import android.os.ParcelUuid
 import android.util.Log
 import kotlinx.coroutines.*
-import java.io.*
-import java.net.ServerSocket
-import java.net.Socket
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * DLTN — Decentralized Local Transceiver Network
  *
- * Three-phase physical logic controller:
- *   Phase A: Passive BLE beacon (low-energy dormant state)
- *   Phase B: AREM-gated BLE scan (temporal + spatial constraint)
- *   Phase C: WiFi Aware bridge (Android) or BLE transfer (iOS fallback)
+ * BLE GATT mesh transceiver. Every node simultaneously:
+ *   • ADVERTISES + runs a GATT server  → it can be discovered and written to
+ *   • SCANS + acts as a GATT client     → it discovers peers and pushes its outbox
+ *
+ * Identity handshake: the BLE advertisement only carries a MAC address, never the
+ * cryptographic node-id. So on connect the client first READs the peer's node-id
+ * from the shared characteristic, then delivers exactly that node's outbox via
+ * length-prefixed chunked writes. Both peers do this to each other → bidirectional
+ * delivery. Envelopes are self-describing (from/to node-id + ECDSA signature), so
+ * the receiver routes & verifies them independently of the BLE MAC.
  */
 @SuppressLint("MissingPermission")
 class DLTNManager(
@@ -51,14 +56,46 @@ class DLTNManager(
     private val serviceUuid = ParcelUuid(UUID.fromString(DLTNConstants.DLTN_BLE_SERVICE_UUID))
     private val charUuid    = UUID.fromString(DLTNConstants.DLTN_BLE_CHAR_UUID)
 
+    // ── Transport state ────────────────────────────────────────────────────────
+    // Known peers discovered via scan: MAC → last RSSI / device handle.
+    private val knownPeers      = ConcurrentHashMap<String, BluetoothDevice>()
+    private val knownRssi       = ConcurrentHashMap<String, Int>()
+    // MAC → resolved node-id, learned via the identity READ handshake.
+    private val peerNodeIds     = ConcurrentHashMap<String, String>()
+    // MAC → last GATT-connect attempt timestamp, to throttle reconnects.
+    private val lastAttemptMs   = ConcurrentHashMap<String, Long>()
+    // Inbound reassembly buffers (GATT server side): MAC → accumulated bytes.
+    private val rxBuffers       = ConcurrentHashMap<String, ByteArrayOutputStream>()
+
+    // Only one outbound GATT client delivery in flight at a time (Android limits
+    // concurrent client connections and serial GATT ops avoid resource churn).
+    private val deliveryInFlight = AtomicBoolean(false)
+    @Volatile private var deliveryStartedMs = 0L
+
+    private val RECONNECT_THROTTLE_MS = 4_000L
+    private val FRAME_HEADER_BYTES    = 4
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     fun start() {
-        if (running.getAndSet(true)) return
-        Log.i(TAG, "[DLTN] Phase A — BLE beacon igniting")
-        startBleAdvertise()
-        scope.launch { aremGatedScanLoop() }
-        startWifiAwarePublish()
+        // Retry-safe: do NOT latch running=true until BLE actually initialises.
+        // If permissions aren't granted yet, startBleAdvertise() throws
+        // SecurityException; we stay not-running so a later ensureMeshStarted()
+        // (after the user grants BLUETOOTH_SCAN/CONNECT) can succeed.
+        if (running.get()) return
+        try {
+            Log.i(TAG, "[DLTN] Igniting — advertise + GATT server + continuous scan")
+            startBleAdvertise()
+            startContinuousScan()
+            startWifiAwarePublish()
+            running.set(true)
+            scope.launch { deliveryWatchdog() }
+            Log.i(TAG, "[DLTN] Mesh online")
+        } catch (e: SecurityException) {
+            Log.w(TAG, "[DLTN] BLE permissions missing — mesh deferred until granted")
+        } catch (e: Exception) {
+            Log.w(TAG, "[DLTN] start failed: ${e.message}")
+        }
     }
 
     fun stop() {
@@ -71,13 +108,13 @@ class DLTNManager(
         Log.i(TAG, "[DLTN] Substrate torn down — MLE restored")
     }
 
-    // ── Phase A — BLE Advertise ───────────────────────────────────────────────
+    // ── BLE Advertise + GATT server ──────────────────────────────────────────
 
     private fun startBleAdvertise() {
         val aremPayload = arem.buildAdvertisementPayload()
 
         val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setConnectable(true)
             .setTimeout(0)
             .build()
@@ -88,7 +125,8 @@ class DLTNManager(
             .setIncludeDeviceName(false)
             .build()
 
-        bleAdvertiser.startAdvertising(settings, data, advertiseCallback)
+        try { bleAdvertiser.startAdvertising(settings, data, advertiseCallback) }
+        catch (e: Exception) { Log.w(TAG, "[ADV] start failed: ${e.message}") }
 
         gattServer = btManager.openGattServer(context, gattServerCallback).also { server ->
             val service = BluetoothGattService(
@@ -110,219 +148,222 @@ class DLTNManager(
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-            Log.d(TAG, "[Phase A] BLE beacon active — duty cycle LOW_POWER")
+            Log.i(TAG, "[ADV] BLE beacon active")
         }
         override fun onStartFailure(errorCode: Int) {
-            Log.w(TAG, "[Phase A] BLE advertise failed: $errorCode")
+            Log.w(TAG, "[ADV] BLE advertise failed: $errorCode")
         }
     }
 
-    // ── Phase B — AREM-gated BLE scan loop ───────────────────────────────────
+    // ── Continuous scan ──────────────────────────────────────────────────────
 
-    private suspend fun aremGatedScanLoop() = withContext(Dispatchers.IO) {
+    private fun startContinuousScan() {
         val filter = ScanFilter.Builder().setServiceUuid(serviceUuid).build()
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
-            .setCallbackType(ScanSettings.CALLBACK_TYPE_FIRST_MATCH)
-            .setMatchMode(ScanSettings.MATCH_MODE_STICKY)
+            .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+            .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
             .build()
-
-        while (running.get() && isActive) {
-            val wait = arem.msUntilNextWindow()
-            if (wait > 0) {
-                Log.v(TAG, "[Phase B] AREM: ${wait}ms until next window — dormant")
-                delay(wait)
-            }
-
-            if (!running.get()) break
-
-            Log.d(TAG, "[Phase B] AREM window open — scanning")
+        try {
             bleScanner.startScan(listOf(filter), settings, scanCallback)
-            delay(DLTNConstants.AREM_WINDOW_MS + DLTNConstants.AREM_JITTER_TOLERANCE)
-            try { bleScanner.stopScan(scanCallback) } catch (_: Exception) {}
-
-            // Sleep remainder of cycle before next window
-            delay((DLTNConstants.AREM_CYCLE_MS - DLTNConstants.AREM_WINDOW_MS).coerceAtLeast(0L))
+            Log.i(TAG, "[SCAN] Continuous scan started (BALANCED / ALL_MATCHES)")
+        } catch (e: Exception) {
+            Log.w(TAG, "[SCAN] start failed: ${e.message}")
         }
     }
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val rssi       = result.rssi
-            val deviceAddr = result.device.address
+            val rssi = result.rssi
+            val addr = result.device.address
+            if (rssi < DLTNConstants.RSSI_GATE_DBM) return
 
-            if (rssi < DLTNConstants.RSSI_GATE_DBM) {
-                Log.v(TAG, "[Phase B] Gate closed — $deviceAddr RSSI $rssi dBm")
-                return
-            }
+            knownPeers[addr] = result.device
+            knownRssi[addr]  = rssi
+            scope.launch { maybeDeliverTo(addr) }
+        }
 
-            // AREM spatial gate — parse peer's advertisement payload
-            val serviceData = result.scanRecord?.getServiceData(serviceUuid)
-            if (serviceData != null) {
-                val peerPayload = arem.parseAdvertisementPayload(serviceData)
-                if (peerPayload != null && !arem.passesSpatialGate(peerPayload, rssi)) {
-                    Log.d(TAG, "[Phase B] AREM spatial gate rejected $deviceAddr")
-                    return
-                }
+        override fun onScanFailed(errorCode: Int) {
+            Log.w(TAG, "[SCAN] failed: $errorCode")
+            // SCAN_FAILED_ALREADY_STARTED (1) is benign; otherwise retry shortly.
+            if (errorCode != SCAN_FAILED_ALREADY_STARTED) {
+                scope.launch { delay(2000); if (running.get()) startContinuousScan() }
             }
-
-            Log.i(TAG, "[Phase B] Gate OPEN — $deviceAddr RSSI $rssi dBm → Phase C")
-            scope.launch {
-                messenger.upsertDiscoveredContact(deviceAddr, rssi)
-                // Deliver any pending outbox messages
-                val pending = messenger.getPendingOutboxForNode(deviceAddr)
-                if (pending.isNotEmpty()) {
-                    Log.i(TAG, "[Phase B] Outbox: ${pending.size} msgs queued for $deviceAddr")
-                }
-            }
-            onPeerProximityConfirmed(deviceAddr, result.device)
         }
     }
 
-    // ── Phase C — Bridge selection ────────────────────────────────────────────
-
-    private fun onPeerProximityConfirmed(peerAddr: String, device: BluetoothDevice) {
-        if (wifiAwareManager?.isAvailable == true) {
-            Log.i(TAG, "[Phase C] WiFi Aware available — negotiating direct bridge")
-            initiateWifiAwareBridge(peerAddr)
-        } else {
-            Log.i(TAG, "[Phase C] WiFi Aware unavailable — BLE fallback engaged")
-            initiateBleTransfer(device, peerAddr)
+    // Periodic retry: messages composed AFTER discovery still need a push, and
+    // some OEMs throttle scan callbacks once a peer is "known". Every few seconds,
+    // re-evaluate each known peer for pending delivery.
+    private suspend fun deliveryWatchdog() {
+        while (running.get()) {
+            delay(5_000L)
+            if (!running.get()) break
+            val hasPending = try { messenger.hasPendingOutbox() } catch (_: Exception) { false }
+            if (!hasPending) continue
+            for (addr in knownPeers.keys) maybeDeliverTo(addr)
         }
     }
 
-    // ── WiFi Aware bridge ─────────────────────────────────────────────────────
+    // ── Outbound delivery (GATT client) ──────────────────────────────────────
 
-    private fun startWifiAwarePublish() {
-        val wam = wifiAwareManager ?: return
-        wam.attach(object : AttachCallback() {
-            override fun onAttached(session: WifiAwareSession) {
-                wifiAwareSession = session
-                val config = PublishConfig.Builder()
-                    .setServiceName(DLTNConstants.WIFI_AWARE_SERVICE_NAME)
-                    .build()
-                session.publish(config, object : DiscoverySessionCallback() {
-                    override fun onServiceDiscovered(
-                        peerHandle: PeerHandle,
-                        serviceSpecificInfo: ByteArray?,
-                        matchFilter: MutableList<ByteArray>
-                    ) {
-                        Log.i(TAG, "[WiFi Aware] Peer discovered via service subscription")
-                    }
-                }, null)
-                Log.d(TAG, "[WiFi Aware] Published: ${DLTNConstants.WIFI_AWARE_SERVICE_NAME}")
-            }
-            override fun onAttachFailed() {
-                Log.w(TAG, "[WiFi Aware] Attach failed — BLE fallback will cover iOS peers")
-            }
-        }, null)
-    }
+    private suspend fun maybeDeliverTo(addr: String) {
+        val now = System.currentTimeMillis()
+        val last = lastAttemptMs[addr] ?: 0L
+        if (now - last < RECONNECT_THROTTLE_MS) return
+        if (deliveryInFlight.get()) {
+            // Self-heal a stuck lock: a GATT connection that silently died (no
+            // callback) must not block the mesh forever. One delivery never
+            // legitimately exceeds 20s.
+            if (now - deliveryStartedMs > 20_000L) {
+                Log.w(TAG, "[CLIENT] stale delivery lock — forcing reset")
+                deliveryInFlight.set(false)
+            } else return
+        }
 
-    private fun initiateWifiAwareBridge(peerAddr: String) {
-        val wam = wifiAwareManager ?: return
-        wam.attach(object : AttachCallback() {
-            override fun onAttached(session: WifiAwareSession) {
-                val config = SubscribeConfig.Builder()
-                    .setServiceName(DLTNConstants.WIFI_AWARE_SERVICE_NAME)
-                    .build()
-                session.subscribe(config, object : DiscoverySessionCallback() {
-                    override fun onServiceDiscovered(
-                        peerHandle: PeerHandle,
-                        serviceSpecificInfo: ByteArray?,
-                        matchFilter: MutableList<ByteArray>
-                    ) {
-                        scope.launch { openWifiAwareSocket(session, peerHandle, peerAddr) }
-                    }
-                }, null)
-            }
-            override fun onAttachFailed() {
-                Log.w(TAG, "[WiFi Aware] Subscribe attach failed")
-            }
-        }, null)
-    }
+        // Connect if we don't yet know this peer's identity, or there is mail to push.
+        val identityKnown = peerNodeIds.containsKey(addr)
+        val hasPending = try { messenger.hasPendingOutbox() } catch (_: Exception) { false }
+        if (identityKnown && !hasPending) return
 
-    private suspend fun openWifiAwareSocket(
-        session: WifiAwareSession,
-        peerHandle: PeerHandle,
-        peerAddr: String,
-    ) = withContext(Dispatchers.IO) {
+        // If identity IS known, only connect when this specific peer has mail.
+        if (identityKnown) {
+            val nodeId = peerNodeIds[addr]!!
+            val pending = try { messenger.getPendingOutboxEnvelopes(nodeId) } catch (_: Exception) { emptyList() }
+            if (pending.isEmpty()) return
+        }
+
+        val device = knownPeers[addr] ?: return
+        if (!deliveryInFlight.compareAndSet(false, true)) return
+        deliveryStartedMs = now
+        lastAttemptMs[addr] = now
+        Log.i(TAG, "[CLIENT] Connecting to $addr (identityKnown=$identityKnown)")
         try {
-            val serverSocket = ServerSocket(DLTNConstants.WIFI_AWARE_PORT)
-            serverSocket.soTimeout = DLTNConstants.WIFI_AWARE_TIMEOUT_MS.toInt()
-            Log.d(TAG, "[WiFi Aware] Listening on port ${DLTNConstants.WIFI_AWARE_PORT}")
-            val socket = serverSocket.accept()
-
-            // Deliver outbox first
-            val outbox = messenger.getPendingOutboxForNode(peerAddr)
-            if (outbox.isNotEmpty()) {
-                val out = DataOutputStream(socket.getOutputStream())
-                for (msgBytes in outbox) {
-                    out.writeInt(msgBytes.size)
-                    out.write(msgBytes)
-                }
-                out.flush()
-            }
-
-            receiveAndSettlePayload(socket, peerAddr, bridge = "WIFI_AWARE")
-            socket.close()
-            serverSocket.close()
+            device.connectGatt(context, false, GattClient(addr), BluetoothDevice.TRANSPORT_LE)
         } catch (e: Exception) {
-            Log.w(TAG, "[WiFi Aware] Socket error: ${e.message}")
+            Log.w(TAG, "[CLIENT] connectGatt failed: ${e.message}")
+            deliveryInFlight.set(false)
         }
-        session.close()
-        Log.i(TAG, "[Phase C] WiFi Aware bridge torn down — Phase A restored")
     }
 
-    // ── BLE fallback (iOS peers) ──────────────────────────────────────────────
+    /** Manages one outbound GATT connection: MTU → discover → identity READ → deliver. */
+    private inner class GattClient(private val addr: String) : BluetoothGattCallback() {
+        private var mtuPayload = 20   // usable bytes per write (ATT MTU - 3)
+        private var queue: List<Pair<String, ByteArray>> = emptyList()  // msgId → length-prefixed frame
+        private var envIdx = 0
+        private var chunkOff = 0
+        private var targetNodeId = ""
 
-    private fun initiateBleTransfer(device: BluetoothDevice, peerAddr: String) {
-        device.connectGatt(context, false, object : BluetoothGattCallback() {
-            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    Log.d(TAG, "[BLE Fallback] Connected to $peerAddr")
-                    gatt.discoverServices()
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                Log.i(TAG, "[CLIENT] Connected $addr — requesting MTU")
+                if (!gatt.requestMtu(512)) { gatt.discoverServices() }
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                finish(gatt)
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            mtuPayload = (mtu - 3).coerceAtLeast(20)
+            Log.i(TAG, "[CLIENT] MTU=$mtu (payload=$mtuPayload)")
+            gatt.discoverServices()
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            val char = gatt.getService(UUID.fromString(DLTNConstants.DLTN_BLE_SERVICE_UUID))
+                ?.getCharacteristic(charUuid)
+            if (char == null) { Log.w(TAG, "[CLIENT] char not found on $addr"); finish(gatt); return }
+            // Identity handshake: READ peer's node-id first.
+            gatt.readCharacteristic(char)
+        }
+
+        @Deprecated("Deprecated in API 33; required for minSdk 29")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int,
+        ) {
+            val nodeId = try { String(characteristic.value ?: ByteArray(0), Charsets.UTF_8).trim() } catch (_: Exception) { "" }
+            if (nodeId.isEmpty()) { Log.w(TAG, "[CLIENT] empty identity from $addr"); finish(gatt); return }
+
+            peerNodeIds[addr] = nodeId
+            targetNodeId = nodeId
+            Log.i(TAG, "[CLIENT] $addr identified as ${nodeId.take(8)} — loading outbox")
+
+            scope.launch {
+                messenger.upsertDiscoveredContact(nodeId, knownRssi[addr] ?: -60)
+                val envelopes = messenger.getPendingOutboxEnvelopes(nodeId)
+                queue = envelopes.map { (id, body) -> id to frame(body) }
+                if (queue.isEmpty()) {
+                    Log.i(TAG, "[CLIENT] no mail for ${nodeId.take(8)} — handshake only")
+                    finish(gatt)
+                } else {
+                    Log.i(TAG, "[CLIENT] delivering ${queue.size} envelope(s) to ${nodeId.take(8)}")
+                    envIdx = 0; chunkOff = 0
+                    writeNextChunk(gatt, characteristic)
                 }
             }
+        }
 
-            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-                val char = gatt.getService(UUID.fromString(DLTNConstants.DLTN_BLE_SERVICE_UUID))
-                    ?.getCharacteristic(charUuid) ?: return
-                gatt.readCharacteristic(char)
+        @Deprecated("Deprecated in API 33; required for minSdk 29")
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int,
+        ) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "[CLIENT] write failed ($status) — aborting delivery to $addr")
+                finish(gatt); return
             }
-
-            @Deprecated("Deprecated in API 33 but needed for API 29 minSdk")
-            override fun onCharacteristicRead(
-                gatt: BluetoothGatt,
-                characteristic: BluetoothGattCharacteristic,
-                status: Int,
-            ) {
-                if (status != BluetoothGatt.GATT_SUCCESS) return
-                val payloadBytes = characteristic.value ?: return
-                Log.i(TAG, "[BLE Fallback] Payload received — ${payloadBytes.size} bytes")
-
-                scope.launch {
-                    messenger.receiveRawPayload(peerAddr, payloadBytes)
-                    val hash = sha256Hex(payloadBytes)
-                    val job  = DLTNRelayJob(
-                        jobIdHex         = "ble_relay_${System.currentTimeMillis()}",
-                        peerId           = peerAddr,
-                        vectorLabel      = DLTNConstants.RELAY_VECTOR_LABEL,
-                        payloadHash      = hash,
-                        payloadSizeBytes = payloadBytes.size,
-                    )
-                    onRelayComplete(job)
-                }
-                gatt.disconnect()
-                gatt.close()
-                Log.i(TAG, "[Phase C] BLE bridge torn down — Phase A restored")
+            val frame = queue[envIdx].second
+            chunkOff += minOf(mtuPayload, frame.size - chunkOff)
+            if (chunkOff >= frame.size) {
+                // Envelope fully written → confirm delivered.
+                val msgId = queue[envIdx].first
+                scope.launch { try { messenger.markDelivered(msgId) } catch (_: Exception) {} }
+                Log.i(TAG, "[CLIENT] envelope ${msgId.take(8)} delivered to ${targetNodeId.take(8)}")
+                envIdx += 1; chunkOff = 0
+                if (envIdx >= queue.size) { Log.i(TAG, "[CLIENT] all mail delivered"); finish(gatt); return }
             }
-        })
+            writeNextChunk(gatt, characteristic)
+        }
+
+        private fun writeNextChunk(gatt: BluetoothGatt, char: BluetoothGattCharacteristic) {
+            val frame = queue[envIdx].second
+            val end   = minOf(chunkOff + mtuPayload, frame.size)
+            val chunk = frame.copyOfRange(chunkOff, end)
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            @Suppress("DEPRECATION") run { char.value = chunk; gatt.writeCharacteristic(char) }
+        }
+
+        private fun finish(gatt: BluetoothGatt) {
+            try { gatt.disconnect() } catch (_: Exception) {}
+            try { gatt.close() } catch (_: Exception) {}
+            deliveryInFlight.set(false)
+        }
     }
 
-    // ── GATT server (inbound iOS writes) ─────────────────────────────────────
+    /** Prefix an envelope with a 4-byte big-endian length so the receiver can deframe. */
+    private fun frame(body: ByteArray): ByteArray {
+        val len = body.size
+        val out = ByteArray(FRAME_HEADER_BYTES + len)
+        out[0] = (len ushr 24 and 0xFF).toByte()
+        out[1] = (len ushr 16 and 0xFF).toByte()
+        out[2] = (len ushr 8  and 0xFF).toByte()
+        out[3] = (len         and 0xFF).toByte()
+        System.arraycopy(body, 0, out, FRAME_HEADER_BYTES, len)
+        return out
+    }
+
+    // ── Inbound (GATT server) ─────────────────────────────────────────────────
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
-        private val pendingWrites = mutableMapOf<String, ByteArray>()
+
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice, requestId: Int, offset: Int,
+            characteristic: BluetoothGattCharacteristic,
+        ) {
+            // Identity handshake: hand back our cryptographic node-id.
+            val idBytes = messenger.localNodeId().toByteArray(Charsets.UTF_8)
+            val slice = if (offset >= idBytes.size) ByteArray(0)
+                        else idBytes.copyOfRange(offset, idBytes.size)
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, slice)
+        }
 
         override fun onCharacteristicWriteRequest(
             device: BluetoothDevice, requestId: Int,
@@ -331,55 +372,87 @@ class DLTNManager(
             offset: Int, value: ByteArray,
         ) {
             val addr = device.address
-            pendingWrites[addr] = (pendingWrites[addr] ?: ByteArray(0)) + value
+            val buf = rxBuffers.getOrPut(addr) { ByteArrayOutputStream() }
+            buf.write(value)
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             }
+            drainFrames(addr)
+        }
 
-            val accumulated = pendingWrites[addr] ?: return
-            if (accumulated.size >= value.size) {
-                scope.launch {
-                    messenger.receiveRawPayload(addr, accumulated)
-                    val hash = sha256Hex(accumulated)
-                    val job  = DLTNRelayJob(
-                        jobIdHex         = "gatt_relay_${System.currentTimeMillis()}",
-                        peerId           = addr,
-                        vectorLabel      = DLTNConstants.RELAY_VECTOR_LABEL,
-                        payloadHash      = hash,
-                        payloadSizeBytes = accumulated.size,
-                    )
-                    onRelayComplete(job)
-                    pendingWrites.remove(addr)
-                }
+        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                rxBuffers.remove(device.address)
             }
         }
     }
 
-    // ── WiFi Aware payload reception ──────────────────────────────────────────
-
-    private fun receiveAndSettlePayload(socket: Socket, peerAddr: String, bridge: String) {
-        try {
-            val input        = DataInputStream(socket.getInputStream())
-            val length       = input.readInt()
-            val payloadBytes = ByteArray(length)
-            input.readFully(payloadBytes)
-            Log.i(TAG, "[$bridge] Received $length bytes from $peerAddr")
-
-            scope.launch {
-                messenger.receiveRawPayload(peerAddr, payloadBytes)
-                val hash = sha256Hex(payloadBytes)
-                val job  = DLTNRelayJob(
-                    jobIdHex         = "wifi_relay_${System.currentTimeMillis()}",
-                    peerId           = peerAddr,
-                    vectorLabel      = DLTNConstants.RELAY_VECTOR_LABEL,
-                    payloadHash      = hash,
-                    payloadSizeBytes = length,
-                )
-                onRelayComplete(job)
+    /** Extract every complete length-prefixed frame from a peer's inbound buffer. */
+    private fun drainFrames(addr: String) {
+        val buf = rxBuffers[addr] ?: return
+        var bytes = buf.toByteArray()
+        var consumed = 0
+        while (bytes.size - consumed >= FRAME_HEADER_BYTES) {
+            val len = ((bytes[consumed].toInt()     and 0xFF) shl 24) or
+                      ((bytes[consumed + 1].toInt() and 0xFF) shl 16) or
+                      ((bytes[consumed + 2].toInt() and 0xFF) shl 8)  or
+                      ( bytes[consumed + 3].toInt() and 0xFF)
+            if (len <= 0 || len > 5_000_000) {           // corrupt → reset this peer's buffer
+                Log.w(TAG, "[SERVER] bad frame length $len from $addr — resetting buffer")
+                rxBuffers[addr] = ByteArrayOutputStream(); return
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "[$bridge] Receive error: ${e.message}")
+            val frameEnd = consumed + FRAME_HEADER_BYTES + len
+            if (bytes.size < frameEnd) break             // incomplete — wait for more chunks
+            val payload = bytes.copyOfRange(consumed + FRAME_HEADER_BYTES, frameEnd)
+            consumed = frameEnd
+            handleInboundEnvelope(addr, payload)
         }
+        // Persist any unconsumed tail back into the buffer.
+        if (consumed > 0) {
+            val tail = bytes.copyOfRange(consumed, bytes.size)
+            val nb = ByteArrayOutputStream(); nb.write(tail)
+            rxBuffers[addr] = nb
+        }
+    }
+
+    private fun handleInboundEnvelope(addr: String, payload: ByteArray) {
+        Log.i(TAG, "[SERVER] envelope received from $addr — ${payload.size} bytes")
+        scope.launch {
+            messenger.receiveRawPayload(addr, payload)
+            val job = DLTNRelayJob(
+                jobIdHex         = "gatt_relay_${System.currentTimeMillis()}",
+                peerId           = addr,
+                vectorLabel      = DLTNConstants.RELAY_VECTOR_LABEL,
+                payloadHash      = sha256Hex(payload),
+                payloadSizeBytes = payload.size,
+            )
+            onRelayComplete(job)
+        }
+    }
+
+    // ── WiFi Aware (kept for capable hardware; BLE is the active path) ─────────
+
+    private fun startWifiAwarePublish() {
+        val wam = wifiAwareManager ?: return
+        if (wam.isAvailable != true) return
+        try {
+            wam.attach(object : AttachCallback() {
+                override fun onAttached(session: WifiAwareSession) {
+                    wifiAwareSession = session
+                    val config = PublishConfig.Builder()
+                        .setServiceName(DLTNConstants.WIFI_AWARE_SERVICE_NAME)
+                        .build()
+                    session.publish(config, object : DiscoverySessionCallback() {
+                        override fun onServiceDiscovered(
+                            peerHandle: PeerHandle,
+                            serviceSpecificInfo: ByteArray?,
+                            matchFilter: MutableList<ByteArray>
+                        ) { Log.i(TAG, "[WiFi Aware] Peer discovered") }
+                    }, null)
+                }
+                override fun onAttachFailed() { Log.w(TAG, "[WiFi Aware] Attach failed") }
+            }, null)
+        } catch (e: Exception) { Log.w(TAG, "[WiFi Aware] publish error: ${e.message}") }
     }
 
     private fun sha256Hex(data: ByteArray): String {

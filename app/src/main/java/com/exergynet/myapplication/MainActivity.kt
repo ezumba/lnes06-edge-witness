@@ -116,6 +116,22 @@ class MainActivity : FragmentActivity() {
         if (permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
             sendToLog("[SYSTEM] Geospatial tracking authorized.")
         }
+        // Once the user grants the BLE runtime permissions, ignite the mesh
+        // immediately — the service's initial start() likely deferred because the
+        // permissions weren't granted yet at boot.
+        val scanOk = permissions[Manifest.permission.BLUETOOTH_SCAN] == true
+        val connOk = permissions[Manifest.permission.BLUETOOTH_CONNECT] == true
+        if (scanOk || connOk) {
+            sendToLog("[SYSTEM] BLE mesh permissions granted — igniting transceiver.")
+            // The service may still be constructing; retry briefly until instance is live.
+            lifecycleScope.launch {
+                repeat(5) {
+                    val svc = DLTNForegroundService.instance
+                    if (svc != null) { svc.ensureMeshStarted(); return@launch }
+                    kotlinx.coroutines.delay(400)
+                }
+            }
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -229,8 +245,14 @@ class MainActivity : FragmentActivity() {
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.CAMERA
         )
-        // DLTN: BLUETOOTH_ADVERTISE requires API 31+ (Android 12+)
+        // DLTN: BLUETOOTH_SCAN / CONNECT / ADVERTISE are runtime (dangerous)
+        // permissions on API 31+ (Android 12+). Without SCAN the mesh can't
+        // discover peers; without CONNECT every GATT op (server, connect, read,
+        // write) throws SecurityException and is silently swallowed → no message
+        // or call ever crosses. All three MUST be requested, not just ADVERTISE.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissionList.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissionList.add(Manifest.permission.BLUETOOTH_CONNECT)
             permissionList.add(Manifest.permission.BLUETOOTH_ADVERTISE)
         }
         // DLTN: NEARBY_WIFI_DEVICES requires API 33+ (Android 13+)
