@@ -72,6 +72,13 @@ class DLTNManager(
     private val deliveryInFlight = AtomicBoolean(false)
     @Volatile private var deliveryStartedMs = 0L
 
+    // ── Live diagnostics (surfaced to the UI so failures are observable) ───────
+    @Volatile private var advertiseOk   = false
+    @Volatile private var advertiseErr  = 0
+    @Volatile private var scanStarted   = false
+    @Volatile private var scanErr       = 0
+    @Volatile private var lastDeliveryNote = "idle"
+
     private val RECONNECT_THROTTLE_MS = 4_000L
     private val FRAME_HEADER_BYTES    = 4
 
@@ -148,9 +155,11 @@ class DLTNManager(
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+            advertiseOk = true; advertiseErr = 0
             Log.i(TAG, "[ADV] BLE beacon active")
         }
         override fun onStartFailure(errorCode: Int) {
+            advertiseOk = false; advertiseErr = errorCode
             Log.w(TAG, "[ADV] BLE advertise failed: $errorCode")
         }
     }
@@ -165,8 +174,10 @@ class DLTNManager(
             .build()
         try {
             bleScanner.startScan(listOf(filter), settings, scanCallback)
+            scanStarted = true; scanErr = 0
             Log.i(TAG, "[SCAN] Continuous scan started (BALANCED / ALL_MATCHES)")
         } catch (e: Exception) {
+            scanStarted = false
             Log.w(TAG, "[SCAN] start failed: ${e.message}")
         }
     }
@@ -183,6 +194,7 @@ class DLTNManager(
         }
 
         override fun onScanFailed(errorCode: Int) {
+            scanErr = errorCode; scanStarted = false
             Log.w(TAG, "[SCAN] failed: $errorCode")
             // SCAN_FAILED_ALREADY_STARTED (1) is benign; otherwise retry shortly.
             if (errorCode != SCAN_FAILED_ALREADY_STARTED) {
@@ -285,6 +297,7 @@ class DLTNManager(
 
             peerNodeIds[addr] = nodeId
             targetNodeId = nodeId
+            lastDeliveryNote = "handshook ${nodeId.take(8)} @ ${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date())}"
             Log.i(TAG, "[CLIENT] $addr identified as ${nodeId.take(8)} — loading outbox")
 
             scope.launch {
@@ -316,6 +329,7 @@ class DLTNManager(
                 // Envelope fully written → confirm delivered.
                 val msgId = queue[envIdx].first
                 scope.launch { try { messenger.markDelivered(msgId) } catch (_: Exception) {} }
+                lastDeliveryNote = "delivered to ${targetNodeId.take(8)} @ ${java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date())}"
                 Log.i(TAG, "[CLIENT] envelope ${msgId.take(8)} delivered to ${targetNodeId.take(8)}")
                 envIdx += 1; chunkOff = 0
                 if (envIdx >= queue.size) { Log.i(TAG, "[CLIENT] all mail delivered"); finish(gatt); return }
@@ -458,5 +472,32 @@ class DLTNManager(
     private fun sha256Hex(data: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(data)
         return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    // ── Diagnostics ─────────────────────────────────────────────────────────
+    /** Live mesh state as JSON, for the in-app diagnostics panel. */
+    fun diagnostics(): String {
+        val adapterOn = try { btAdapter?.isEnabled == true } catch (_: Exception) { false }
+        val peers = org.json.JSONArray()
+        for ((mac, dev) in knownPeers) {
+            peers.put(org.json.JSONObject().apply {
+                put("mac", mac)
+                put("rssi", knownRssi[mac] ?: 0)
+                put("nodeId", peerNodeIds[mac] ?: "")
+            })
+        }
+        return org.json.JSONObject().apply {
+            put("running", running.get())
+            put("adapterOn", adapterOn)
+            put("advertising", advertiseOk)
+            put("advertiseErr", advertiseErr)
+            put("scanning", scanStarted)
+            put("scanErr", scanErr)
+            put("peerCount", knownPeers.size)
+            put("peers", peers)
+            put("deliveryInFlight", deliveryInFlight.get())
+            put("lastDelivery", lastDeliveryNote)
+            put("localNodeId", messenger.localNodeId())
+        }.toString()
     }
 }

@@ -34,6 +34,12 @@
     <!-- Android 14+: required to run the call FGS with the microphone type so the
          OS does not asphyxiate the active voice pipeline in the background. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Android 14+: dataSync is a normal (auto-granted) FGS type. We boot the
+         relay service as dataSync so it NEVER crashes at startup before the user
+         has granted a Bluetooth permission (connectedDevice would throw and kill
+         the service). Once BLE perms land, the banner is promoted to
+         connectedDevice. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <!-- Voice call audio routing -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
@@ -83,7 +89,7 @@
         <service
             android:name=".DLTNForegroundService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|microphone" />
+            android:foregroundServiceType="connectedDevice|microphone|dataSync" />
 
     </application>
 </manifest>

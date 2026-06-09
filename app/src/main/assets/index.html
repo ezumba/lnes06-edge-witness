@@ -1402,7 +1402,7 @@
             </div>
         </div>
         <button class="btn-danger" onclick="confirmSignOut()">Sign Out</button>
-        <p style="font-size:11px;color:var(--app-hint);text-align:center;margin-top:12px">ExergyNet Edge Witness v1.5.7 · LNES-06</p>
+        <p style="font-size:11px;color:var(--app-hint);text-align:center;margin-top:12px">ExergyNet Edge Witness v1.6.0 · LNES-06 + LNES-12</p>
     </div>
 </div>
 
@@ -1681,6 +1681,21 @@
         </div>
     </div>
 
+    <!-- Mesh diagnostics modal -->
+    <div id="meshdiag-modal" style="display:none;position:fixed;inset:0;z-index:95;background:rgba(0,0,0,.6);align-items:center;justify-content:center;padding:20px" onclick="if(event.target===this)closeMeshDiag()">
+        <div style="width:100%;max-width:460px;max-height:80vh;overflow-y:auto;background:var(--app-bg);border-radius:16px;border:.5px solid var(--app-border);padding:18px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                <span style="font-size:16px;font-weight:700;color:var(--app-text)">Mesh Diagnostics</span>
+                <i class="ti ti-x" style="font-size:22px;color:var(--app-muted);cursor:pointer" onclick="closeMeshDiag()"></i>
+            </div>
+            <div id="meshdiag-body" style="color:var(--app-text)">Loading…</div>
+            <div style="display:flex;gap:8px;margin-top:16px">
+                <button onclick="grantMeshPerms()" class="btn-primary" style="flex:1"><i class="ti ti-shield-check"></i> Grant Permissions</button>
+                <button onclick="showMeshDiagnostics()" style="flex:1;background:var(--app-card);border:.5px solid var(--app-border);color:var(--app-text);border-radius:10px;padding:11px"><i class="ti ti-refresh"></i> Refresh</button>
+            </div>
+        </div>
+    </div>
+
     <!-- NODE detail screen (dialer-style "Node info" — tap a node's name) -->
     <div id="node-detail" style="display:none;position:fixed;inset:0;z-index:65;background:var(--app-bg);flex-direction:column">
         <div style="display:flex;align-items:center;gap:14px;padding:16px;border-bottom:.5px solid var(--app-border)">
@@ -1780,8 +1795,9 @@
 
         <!-- DLTN mesh peer conversations -->
         <div id="contacts-list" style="padding-bottom:80px">
-            <div style="padding:10px 16px 4px">
+            <div style="padding:10px 16px 4px;display:flex;align-items:center;justify-content:space-between">
                 <div style="font-size:11px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--app-muted)">Mesh Peers</div>
+                <div onclick="showMeshDiagnostics()" style="font-size:11px;font-weight:600;color:var(--app-teal);cursor:pointer;-webkit-tap-highlight-color:transparent"><i class="ti ti-stethoscope" style="font-size:13px;vertical-align:middle"></i> Diagnostics</div>
             </div>
             <div id="peer-conv-rows">
                 <div style="text-align:center;padding:28px 0">
@@ -4275,6 +4291,56 @@ let callTimerSecs = 0;
 function loadDLTNContacts() {
   if (window.ExergyKinesis && window.ExergyKinesis.getDLTNContacts) {
     window.ExergyKinesis.getDLTNContacts();
+  }
+}
+
+// ── Mesh diagnostics ────────────────────────────────────────────────────────
+function showMeshDiagnostics() {
+  if (window.ExergyKinesis && window.ExergyKinesis.getMeshDiagnostics) {
+    window.ExergyKinesis.getMeshDiagnostics();
+  } else {
+    showToast('Diagnostics only available in the app', 'warn');
+  }
+}
+
+function onMeshDiagnostics(json) {
+  let d = {};
+  try { d = JSON.parse(json); } catch(e) { d = { error: 'parse failed' }; }
+  const yn = v => v ? '<span style="color:var(--app-teal)">✓ yes</span>' : '<span style="color:#ff6b6b">✗ NO</span>';
+  const peers = (d.peers || []).map(p =>
+    `<div style="font-family:monospace;font-size:11px;color:var(--app-text);margin:2px 0">• ${p.mac} · ${p.rssi}dBm${p.nodeId ? ' · '+p.nodeId.substring(0,8) : ' · (no id yet)'}</div>`
+  ).join('') || '<div style="font-size:12px;color:var(--app-muted)">none</div>';
+
+  const permsOk = d.permScan && d.permConnect && d.permAdvertise;
+  const html =
+    '<div style="text-align:left;font-size:13px;line-height:1.9">' +
+    '<div style="font-weight:700;margin-bottom:6px">BLE Permissions</div>' +
+    'Scan: '+yn(d.permScan)+' &nbsp; Connect: '+yn(d.permConnect)+' &nbsp; Advertise: '+yn(d.permAdvertise)+'<br>' +
+    (permsOk ? '' : '<div style="color:#ff6b6b;font-size:12px;margin:4px 0">Permissions missing — tap "Grant Permissions" below.</div>') +
+    '<div style="font-weight:700;margin:8px 0 6px">Radio</div>' +
+    'Bluetooth on: '+yn(d.adapterOn)+'<br>' +
+    'Mesh running: '+yn(d.running)+'<br>' +
+    'Advertising: '+yn(d.advertising)+(d.advertiseErr ? ' (err '+d.advertiseErr+')' : '')+'<br>' +
+    'Scanning: '+yn(d.scanning)+(d.scanErr ? ' (err '+d.scanErr+')' : '')+'<br>' +
+    '<div style="font-weight:700;margin:8px 0 6px">Peers seen ('+(d.peerCount||0)+')</div>' +
+    peers +
+    '<div style="font-weight:700;margin:8px 0 6px">Delivery</div>' +
+    'In flight: '+yn(d.deliveryInFlight)+'<br>' +
+    'Last: <span style="font-size:12px;color:var(--app-muted)">'+(d.lastDelivery||'idle')+'</span><br>' +
+    '<div style="font-size:11px;color:var(--app-hint);margin-top:8px">Your node: <span style="font-family:monospace">'+(d.localNodeId||'?')+'</span></div>' +
+    '</div>';
+
+  const body = document.getElementById('meshdiag-body');
+  if (body) body.innerHTML = html;
+  const m = document.getElementById('meshdiag-modal');
+  if (m) m.style.display = 'flex';
+}
+
+function closeMeshDiag() { const m = document.getElementById('meshdiag-modal'); if (m) m.style.display='none'; }
+function grantMeshPerms() {
+  if (window.ExergyKinesis && window.ExergyKinesis.requestMeshPermissions) {
+    window.ExergyKinesis.requestMeshPermissions();
+    showToast('Grant the Nearby devices permission, then re-open Diagnostics', 'info');
   }
 }
 
