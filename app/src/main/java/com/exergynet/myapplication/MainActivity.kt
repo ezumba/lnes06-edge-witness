@@ -1423,6 +1423,56 @@ class MainActivity : FragmentActivity() {
             }
         }
 
+        /**
+         * Called when the user corrects a wrong contact node ID.
+         * Steps:
+         *  1. Delete the old NodeBook entry (wrong ID)
+         *  2. Upsert a new NodeBook entry with the correct ID + same alias
+         *  3. Update DLTNContactEntity: remove old, upsert new
+         *  4. Repoint all messages that had toNodeId=old to toNodeId=new
+         *     so pending outbox messages go to the right peer and conversation
+         *     history merges cleanly under the correct node ID.
+         */
+        @JavascriptInterface
+        fun correctContactNodeId(oldNodeId: String, newNodeId: String, alias: String) {
+            val old = oldNodeId.trim(); val new = newNodeId.trim()
+            if (old.isEmpty() || new.isEmpty() || old == new) return
+            lifecycleScope.launch(Dispatchers.IO) {
+                val db    = ExergyDatabase.getDatabase(this@MainActivity)
+                val svc   = getDLTNService()
+
+                // 1. Update NodeBook
+                db.nodeBookDao().delete(old)
+                db.nodeBookDao().upsert(NodeBookEntity(
+                    nodeId   = new,
+                    alias    = alias.ifBlank { "Node ${new.take(8)}" },
+                    lastSeen = System.currentTimeMillis(),
+                ))
+
+                // 2. Update DLTNContact (messenger layer)
+                if (svc != null) {
+                    val oldContact = svc.messenger.getAllContacts().firstOrNull { it.nodeId == old }
+                    if (oldContact != null) {
+                        svc.messenger.addManualContact(
+                            nodeId      = new,
+                            displayName = alias.ifBlank { oldContact.displayName },
+                            walletAddress = null,
+                        )
+                    }
+                    // Remove old contact entry so the wrong ID no longer appears
+                    db.dltnContactDao().delete(old)
+                }
+
+                // 3. Repoint all messages from old ID to new ID
+                db.dltnMessageDao().repointMessagesToNode(old, new)
+                db.dltnMessageDao().repointMessagesFromNode(old, new)
+
+                withContext(Dispatchers.Main) {
+                    callJs("onContactNodeIdCorrected", old, new)
+                }
+            }
+        }
+
         // ── Sovereign identity / share / QR ────────────────────────────────
         // The node's permanent cryptographic identity (scalable alphanumeric handle),
         // NOT a sequential "Witness #N". Used for routing, sharing, and QR.

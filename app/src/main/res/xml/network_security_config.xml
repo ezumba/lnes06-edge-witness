@@ -1,8 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <!-- All named public hosts: TLS required, no cleartext -->
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
-            <certificates src="system" />
+            <certificates src="system"/>
         </trust-anchors>
     </base-config>
+    <!-- L0 Router (Alpha EC2 LAN) — numeric IP, cleartext TCP permitted -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">18.209.174.113</domain>
+        <domain includeSubdomains="false">172.31.41.253</domain>
+        <domain includeSubdomains="false">192.168.1.1</domain>
+    </domain-config>
+    <!-- Debug builds only -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user"/>
+        </trust-anchors>
+    </debug-overrides>
 </network-security-config>

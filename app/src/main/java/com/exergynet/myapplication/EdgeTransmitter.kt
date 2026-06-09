@@ -114,6 +114,37 @@ object EdgeTransmitter {
         return mac.doFinal(data) // 32 bytes
     }
 
+    /**
+     * LNES-11 OFF-GRID: request/response over the local DLTN TCP socket (Port 8003).
+     * Sends [32B HMAC][payload] exactly like trySendTcp, then half-closes the write
+     * side and BLOCKS reading the desktop prover's reply (the resolved coordinates,
+     * e.g. "geo:lat,lon" or a small JSON). Used when the cloud DNS/HTTPS path fails.
+     * Returns the raw reply string, or null on any failure.
+     */
+    suspend fun requestTcp(
+        ip: String,
+        port: Int,
+        data: ByteArray,
+        tcpSecret: ByteArray,
+        readTimeoutMs: Int = 90_000,
+    ): String? = withContext(Dispatchers.IO) {
+        try {
+            val frame = if (tcpSecret.isNotEmpty()) hmacSha256(tcpSecret, data) + data else data
+            Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress(ip, port), 6000)
+                socket.soTimeout = readTimeoutMs   // desktop ZK solve may take a while
+                DataOutputStream(socket.getOutputStream()).apply { write(frame); flush() }
+                // Signal end-of-request so the desktop can read the full payload, compute, reply.
+                try { socket.shutdownOutput() } catch (_: Exception) {}
+                val reply = socket.getInputStream().bufferedReader().readText().trim()
+                reply.ifEmpty { null }
+            }
+        } catch (e: Exception) {
+            println(">>> [EDGE] TCP request to $ip:$port failed: ${e.message}")
+            null
+        }
+    }
+
     private fun postToApex(
         jobIdHex: String,
         proofHash: String,
