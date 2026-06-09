@@ -55,11 +55,22 @@ object DLTNConstants {
     const val DLTN_NOTIFICATION_CHANNEL_NAME = "Mesh Relay"
     const val DLTN_FOREGROUND_NOTIFICATION_ID = 42
 
+    // A channel's importance is fixed at creation time and cannot be raised later,
+    // so an "Active Call" state needs its own IMPORTANCE_HIGH channel rather than
+    // mutating the low-importance relay channel.
+    const val DLTN_CALL_CHANNEL_ID   = "dltn_call_channel"
+    const val DLTN_CALL_CHANNEL_NAME = "Active Call"
+
     // ── Voice Calls ───────────────────────────────────────────────────────────
     const val WIFI_AWARE_VOICE_PORT   = 7433
     const val VOICE_SAMPLE_RATE_HZ    = 16000
     const val VOICE_BUFFER_BYTES      = 640
     const val VOICE_TIMEOUT_MS        = 30_000L
+    // WiFi-Aware voice link PSK (encrypts the data path; closes red-team D4).
+    // ⚠ Placeholder — both peers share this static key. Replace with a per-call
+    // negotiated secret (e.g. ECDH keyed off the signed call_invite) before
+    // production: a static PSK gives link encryption but no per-session secrecy.
+    const val WIFI_AWARE_VOICE_PSK    = "exergynet-dltn-voice-psk-v1"
     const val MSG_TYPE_CALL_INVITE    = "call_invite"
     const val MSG_TYPE_CALL_ACCEPT    = "call_accept"
     const val MSG_TYPE_CALL_REJECT    = "call_reject"

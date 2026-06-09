@@ -1669,8 +1669,11 @@
                 <i class="ti ti-x" style="font-size:22px;color:var(--app-muted);cursor:pointer" onclick="closeNodeBookSheet()"></i>
             </div>
             <label style="font-size:12px;color:var(--app-muted);display:block;margin-bottom:4px">Node ID (cryptographic identity)</label>
-            <input id="nb-node-id" type="text" placeholder="0x… / Base58 node id"
-                style="width:100%;background:var(--app-surface);border:.5px solid var(--app-border);border-radius:10px;padding:11px 12px;font-size:14px;color:var(--app-text);font-family:monospace;outline:none;margin-bottom:12px;-webkit-user-select:text;user-select:text">
+            <input id="nb-node-id" type="text" placeholder="Paste 16-char Node ID here"
+                style="width:100%;background:var(--app-surface);border:.5px solid var(--app-border);border-radius:10px;padding:11px 12px;font-size:14px;color:var(--app-text);font-family:monospace;outline:none;margin-bottom:4px;-webkit-user-select:text;user-select:text">
+            <div id="nb-id-hint" style="display:none;font-size:11px;color:var(--app-teal);margin-bottom:10px;padding:6px 10px;background:rgba(0,232,135,.08);border-radius:7px;border:.5px solid rgba(0,232,135,.25)">
+              To fix a wrong node ID: get your peer's Node ID from their app (Node Book → Share), then paste it here. All messages will migrate automatically.
+            </div>
             <label style="font-size:12px;color:var(--app-muted);display:block;margin-bottom:4px">Alias</label>
             <input id="nb-alias" type="text" placeholder="e.g. Berlin-Relay-1"
                 style="width:100%;background:var(--app-surface);border:.5px solid var(--app-border);border-radius:10px;padding:11px 12px;font-size:14px;color:var(--app-text);outline:none;margin-bottom:16px;-webkit-user-select:text;user-select:text">
@@ -4607,7 +4610,13 @@ function openNodeBookSheet(prefillId) {
   var existing = (window._nodeBook || []).find(function(n){ return String(n.nodeId) === String(prefillId); });
   document.getElementById('nb-alias').value = (existing && existing.alias) ? existing.alias : '';
   var titleEl = document.getElementById('nb-sheet-title');
-  if (titleEl) titleEl.textContent = existing ? 'Edit node name' : 'Save to Node Book';
+  if (titleEl) titleEl.textContent = existing ? 'Edit contact' : 'Add to Node Book';
+  // Track the original node ID so submitNodeBook can detect a correction.
+  window._nbEditingOldId = existing ? String(prefillId) : '';
+  // Show a helper hint when editing an existing contact so the user knows
+  // they can paste a corrected Node ID.
+  var hintEl = document.getElementById('nb-id-hint');
+  if (hintEl) hintEl.style.display = existing ? 'block' : 'none';
   sheet.style.display = 'flex';
 }
 
@@ -4616,17 +4625,32 @@ function closeNodeBookSheet() {
   if (sheet) sheet.style.display = 'none';
 }
 
+// _nbEditingOldId: set when we open the sheet for an EXISTING contact,
+// so submitNodeBook can detect a node-ID correction.
+window._nbEditingOldId = '';
+
 function submitNodeBook() {
   var nodeId = (document.getElementById('nb-node-id').value || '').trim();
   var alias  = (document.getElementById('nb-alias').value || '').trim();
   if (!nodeId) { showToast('Node ID required', 'warn'); return; }
-  if (window.ExergyKinesis && window.ExergyKinesis.saveToNodeBook) {
+
+  var oldId = window._nbEditingOldId || '';
+  window._nbEditingOldId = '';
+
+  if (oldId && oldId !== nodeId && window.ExergyKinesis && window.ExergyKinesis.correctContactNodeId) {
+    // Node ID changed — migrate all messages + contacts to the new ID
+    window.ExergyKinesis.correctContactNodeId(oldId, nodeId, alias);
+  } else if (window.ExergyKinesis && window.ExergyKinesis.saveToNodeBook) {
     window.ExergyKinesis.saveToNodeBook(nodeId, alias);
   }
   closeNodeBookSheet();
 }
 
 function onNodeBookSaved(nodeId) { showToast('Saved to Node Book', 'success'); loadNodeBook(); }
+function onContactNodeIdCorrected(oldId, newId) {
+  showToast('Contact updated — messages migrated', 'success');
+  loadNodeBook();
+}
 
 function removeFromNodeBook(nodeId) {
   if (window.ExergyKinesis && window.ExergyKinesis.deleteFromNodeBook) {
@@ -4702,7 +4726,13 @@ function onNodeQrScanned(value) {
   switchDialTab('contacts');
   openNodeBookSheet(id);
 }
-function onNodeQrScanError(msg) { showToast('Scan failed: ' + (msg || ''), 'error'); }
+function onNodeQrScanError(msg) {
+  // QR camera scan failed (GMS module not ready, no Play Services, etc.)
+  // Fall through to the manual-paste dialog so the user can still add a contact.
+  showToast('QR unavailable — paste your peer\'s Node ID below', 'warn');
+  switchDialTab('contacts');
+  openNodeBookSheet('');
+}
 
 // ════════════════════════════════════════════════════════════
 // DLTN VOICE CALLS

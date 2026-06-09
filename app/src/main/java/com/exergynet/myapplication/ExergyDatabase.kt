@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DLTNContactEntity::class,
         NodeBookEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class ExergyDatabase : RoomDatabase() {
@@ -75,6 +75,13 @@ abstract class ExergyDatabase : RoomDatabase() {
             }
         }
 
+        // Batch 2: threaded replies — add the replyToId column to dltn_messages.
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE dltn_messages ADD COLUMN replyToId TEXT")
+            }
+        }
+
         fun getDatabase(context: Context): ExergyDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -82,7 +89,7 @@ abstract class ExergyDatabase : RoomDatabase() {
                     ExergyDatabase::class.java,
                     "exergynet_database"
                 )
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

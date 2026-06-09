@@ -2,11 +2,11 @@ package com.exergynet.myapplication
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.media.*
-import android.net.wifi.aware.*
+import android.net.wifi.WifiManager
 import android.util.Log
 import kotlinx.coroutines.*
-import java.io.*
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -14,7 +14,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 @SuppressLint("MissingPermission")
 class DLTNCallEngine(
     private val context: Context,
-    private val onCallStateChanged: (CallState, String) -> Unit,
+    private val onCallStateChanged: (CallState, String, Boolean, String) -> Unit,
+    private val sendSignal: (toNodeId: String, signalType: String, payload: String) -> Unit,
 ) {
     private val TAG = "DLTNCallEngine"
 
@@ -23,63 +24,121 @@ class DLTNCallEngine(
     private var callState  = CallState.IDLE
     private var remotePeer = ""
     private val active     = AtomicBoolean(false)
+    private val intentionalTeardown = AtomicBoolean(false)
     private val scope      = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private val audioEngine = DLTNAudioEngine()
 
-    private val wifiAwareManager by lazy {
-        context.getSystemService(Context.WIFI_AWARE_SERVICE) as? WifiAwareManager
-    }
-    private var wifiAwareSession: WifiAwareSession? = null
-    private var serverSocket: ServerSocket?  = null
-    private var callSocket:   Socket?        = null
+    private var serverSocket: ServerSocket? = null
+    private var callSocket:   Socket?       = null
+
+    // Caller's "ip:port" received in CALL_INVITE — stored so acceptIncomingCall can connect.
+    private var pendingCallerAddress = ""
 
     // ── Public API ───────────────────────────────────────────────────────────
 
     fun startOutgoingCall(peerNodeId: String) {
         if (callState != CallState.IDLE) return
-        // Voice is gated strictly to WiFi-Aware (Phase C). BLE MTU/bandwidth cannot
-        // carry continuous audio, so we refuse rather than degrade.
-        if (wifiAwareManager?.isAvailable != true) {
-            Log.w(TAG, "[CALL] WiFi Aware unavailable — voice requires Phase C; aborting outgoing call")
-            setCallState(CallState.ENDED, peerNodeId)
+        intentionalTeardown.set(false)
+
+        val localIp = getLocalNetworkIp()
+        if (localIp == null) {
+            Log.w(TAG, "[CALL] No network IP — connect to WiFi to make calls")
+            setCallState(CallState.ENDED, peerNodeId, reason = "no_wifi")
             return
         }
+
         remotePeer = peerNodeId
         setCallState(CallState.CALLING, peerNodeId)
+
         scope.launch {
-            try { openVoiceServer() }
-            catch (e: Exception) { Log.e(TAG, "[CALL] Outgoing setup failed: ${e.message}"); endCall() }
+            try {
+                // Bind on any free port; the OS picks one.
+                val ss = ServerSocket(0)
+                ss.soTimeout = DLTNConstants.VOICE_TIMEOUT_MS.toInt()
+                serverSocket = ss
+                val port = ss.localPort
+                val addr = "$localIp:$port"
+                Log.i(TAG, "[CALL] Listening on $addr — sending invite to ${peerNodeId.take(8)}")
+
+                // Advertise our address in the invite payload so the callee can connect.
+                sendSignal(peerNodeId, DLTNConstants.MSG_TYPE_CALL_INVITE, addr)
+
+                // Wait for callee to connect (blocking — times out via soTimeout above).
+                val socket = ss.accept()
+                socket.keepAlive = true
+                callSocket = socket
+                ss.close()
+                serverSocket = null
+
+                if (callState != CallState.ENDED) {
+                    setCallState(CallState.CONNECTED, remotePeer)
+                    startAudioStreaming(socket)
+                } else {
+                    socket.close()
+                }
+            } catch (e: Exception) {
+                if (!intentionalTeardown.get()) {
+                    Log.e(TAG, "[CALL] Outgoing setup failed: ${e.message}")
+                }
+                endCall()
+            }
         }
     }
 
     fun acceptIncomingCall(peerNodeId: String) {
         if (callState != CallState.RINGING) return
-        if (wifiAwareManager?.isAvailable != true) {
-            Log.w(TAG, "[CALL] WiFi Aware unavailable — cannot accept voice call over BLE; ending")
-            setCallState(CallState.ENDED, peerNodeId)
+        intentionalTeardown.set(false)
+
+        val addr = pendingCallerAddress
+        if (addr.isEmpty() || !addr.contains(':')) {
+            Log.e(TAG, "[CALL] No caller address in invite — cannot connect")
+            setCallState(CallState.ENDED, peerNodeId, reason = "no_caller_address")
             cleanup()
             return
         }
+
         setCallState(CallState.CONNECTED, peerNodeId)
         scope.launch {
-            try { connectToVoiceServer(peerNodeId) }
-            catch (e: Exception) { Log.e(TAG, "[CALL] Accept failed: ${e.message}"); endCall() }
+            try {
+                val ip   = addr.substringBeforeLast(':')
+                val port = addr.substringAfterLast(':').toInt()
+                Log.i(TAG, "[CALL] Connecting to caller at $ip:$port")
+                sendSignal(peerNodeId, DLTNConstants.MSG_TYPE_CALL_ACCEPT, "")
+                val socket = Socket(ip, port)
+                socket.keepAlive = true
+                callSocket = socket
+                startAudioStreaming(socket)
+            } catch (e: Exception) {
+                Log.e(TAG, "[CALL] Accept connect failed: ${e.message}")
+                endCall()
+            }
         }
     }
 
     fun rejectCall() {
+        intentionalTeardown.set(true)
         setCallState(CallState.ENDED, remotePeer)
         cleanup()
     }
 
     fun endCall() {
         if (callState == CallState.IDLE) return
+        intentionalTeardown.set(true)
         setCallState(CallState.ENDED, remotePeer)
         cleanup()
     }
 
-    fun setRinging(peerNodeId: String) {
+    private fun handleUnexpectedDrop() {
+        if (callState == CallState.IDLE) return
+        if (intentionalTeardown.get()) return
+        Log.e(TAG, "Socket unexpectedly severed by OS")
+        setCallState(CallState.ENDED, remotePeer, dropped = true)
+        cleanup()
+    }
+
+    fun setRinging(peerNodeId: String, callerAddress: String = "") {
+        pendingCallerAddress = callerAddress
         remotePeer = peerNodeId
         setCallState(CallState.RINGING, peerNodeId)
     }
@@ -87,94 +146,61 @@ class DLTNCallEngine(
     fun getCurrentState() = callState
     fun getRemotePeer()   = remotePeer
 
-    // ── Server side (caller waits for recipient to connect) ──────────────────
+    // ── Network IP resolution ─────────────────────────────────────────────────
 
-    private suspend fun openVoiceServer() = withContext(Dispatchers.IO) {
-        serverSocket = ServerSocket(DLTNConstants.WIFI_AWARE_VOICE_PORT)
-        serverSocket!!.soTimeout = DLTNConstants.VOICE_TIMEOUT_MS.toInt()
-        Log.i(TAG, "[CALL] Voice server listening on port ${DLTNConstants.WIFI_AWARE_VOICE_PORT}")
-
-        val socket = serverSocket!!.accept()
-        callSocket = socket
-        serverSocket?.close()
-
-        if (callState != CallState.ENDED) {
-            setCallState(CallState.CONNECTED, remotePeer)
-            startAudioStreaming(socket)
-        } else {
-            socket.close()
-        }
-    }
-
-    // ── Client side (recipient connects to caller) ───────────────────────────
-
-    private suspend fun connectToVoiceServer(peerAddr: String) = withContext(Dispatchers.IO) {
-        delay(500)
-        val wam = wifiAwareManager ?: throw Exception("WiFi Aware not available")
-
-        wam.attach(object : AttachCallback() {
-            override fun onAttached(session: WifiAwareSession) {
-                wifiAwareSession = session
-                val config = SubscribeConfig.Builder()
-                    .setServiceName(DLTNConstants.WIFI_AWARE_SERVICE_NAME + "-voice")
-                    .build()
-
-                session.subscribe(config, object : DiscoverySessionCallback() {
-                    override fun onServiceDiscovered(
-                        peerHandle: PeerHandle,
-                        serviceSpecificInfo: ByteArray?,
-                        matchFilter: MutableList<ByteArray>
-                    ) {
-                        scope.launch {
-                            try {
-                                val socket = Socket(peerAddr, DLTNConstants.WIFI_AWARE_VOICE_PORT)
-                                callSocket = socket
-                                startAudioStreaming(socket)
-                            } catch (e: Exception) { Log.e(TAG, "[CALL] Connect failed: ${e.message}"); endCall() }
-                        }
+    /**
+     * Returns the device's first active non-loopback IPv4 address.
+     * Works on WiFi, hotspot, and Ethernet — no special permissions needed.
+     * Returns null if no suitable network interface is up.
+     */
+    private fun getLocalNetworkIp(): String? {
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            for (iface in ifaces.toList()) {
+                if (!iface.isUp || iface.isLoopback) continue
+                for (addr in iface.inetAddresses.toList()) {
+                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                        val ip = addr.hostAddress
+                        Log.i(TAG, "[CALL] Local network IP: $ip (iface: ${iface.name})")
+                        return ip
                     }
-                }, null)
-            }
-            override fun onAttachFailed() {
-                scope.launch {
-                    try {
-                        delay(300)
-                        val socket = Socket(peerAddr, DLTNConstants.WIFI_AWARE_VOICE_PORT)
-                        callSocket = socket
-                        startAudioStreaming(socket)
-                    } catch (e: Exception) { Log.e(TAG, "[CALL] Direct connect failed: ${e.message}"); endCall() }
                 }
             }
-        }, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "[CALL] IP resolution failed: ${e.message}")
+        }
+        return null
     }
 
     // ── Full-duplex audio streaming ───────────────────────────────────────────
 
     private fun startAudioStreaming(socket: Socket) {
         active.set(true)
-        Log.i(TAG, "[CALL] Audio streaming started — handing socket to DLTNAudioEngine")
-        // Hand the established WiFi-Aware socket streams to the audio engine.
-        // If a stream drops on its own (remote hung up), tear the call down.
-        audioEngine.start(socket.getInputStream(), socket.getOutputStream()) { endCall() }
+        Log.i(TAG, "[CALL] Audio streaming started")
+        audioEngine.start(socket.getInputStream(), socket.getOutputStream()) { handleUnexpectedDrop() }
     }
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     private fun cleanup() {
         active.set(false)
-        audioEngine.stop()   // release mic + speaker hardware immediately
+        audioEngine.stop()
         try { callSocket?.close()  } catch (_: Exception) {}
         try { serverSocket?.close() } catch (_: Exception) {}
-        try { wifiAwareSession?.close() } catch (_: Exception) {}
-        callSocket     = null; serverSocket   = null; wifiAwareSession = null
-        callState      = CallState.IDLE; remotePeer = ""
+        callSocket       = null; serverSocket     = null
+        callState        = CallState.IDLE; remotePeer = ""
+        pendingCallerAddress = ""
         Log.i(TAG, "[CALL] Cleaned up — MLE restored")
     }
 
-    private fun setCallState(state: CallState, peer: String) {
+    private fun setCallState(
+        state: CallState, peer: String, dropped: Boolean = false, reason: String = "",
+    ) {
         callState = state
-        onCallStateChanged(state, peer)
-        Log.i(TAG, "[CALL] State → $state (peer: ${peer.take(8)})")
+        onCallStateChanged(state, peer, dropped, reason)
+        Log.i(TAG, "[CALL] State → $state (peer: ${peer.take(8)})" +
+            (if (dropped) " [DROPPED]" else "") +
+            (if (reason.isNotEmpty()) " [$reason]" else ""))
     }
 
     fun destroy() { cleanup(); audioEngine.destroy(); scope.cancel() }
