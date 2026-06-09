@@ -76,6 +76,8 @@ class DLTNForegroundService : Service() {
                 scope.launch { messenger.receiveRawPayload(DLTNConstants.CALL_RAIL_GLOBAL, bytes) }
             },
         )
+        // LNES-12 Message Hub: let the messenger race text over the global rail too.
+        messenger.globalSend = { to, env -> globalMesh?.sendSignalEnvelope(to, env) }
 
         callEngine = DLTNCallEngine(
             context            = this,

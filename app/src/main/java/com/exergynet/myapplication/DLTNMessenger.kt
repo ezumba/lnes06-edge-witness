@@ -21,6 +21,16 @@ class DLTNMessenger(
     private val db  by lazy { ExergyDatabase.getDatabase(context) }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    /**
+     * LNES-12 Message Hub: optional global-rail transmit hook, wired by
+     * DLTNForegroundService to GlobalMeshService. When set and connected, outbound
+     * text messages are ALSO pushed over the Sovereign WebSocket so they reach
+     * peers outside BLE range. The local BLE outbox remains the primary path; the
+     * receiver dedups by message id (insert is OnConflictStrategy.IGNORE), so a
+     * message delivered on both rails is stored/shown exactly once.
+     */
+    @Volatile var globalSend: ((toNodeId: String, envelopeBytes: ByteArray) -> Unit)? = null
+
     // ── Local node identity ──────────────────────────────────────────────────
 
     fun getLocalNodeId(): String {
@@ -48,6 +58,10 @@ class DLTNMessenger(
         )
         db.dltnMessageDao().insert(msg)
         Log.i(TAG, "[SEND] text → $toNodeId queued${if (replyToId != null) " (reply)" else ""}")
+        // LNES-12 Message Hub: race the global rail too. Same envelope id → the
+        // receiver dedups if it also arrives over local BLE. If the internet is
+        // severed, globalSend is a no-op and local mesh remains the only path.
+        try { globalSend?.invoke(toNodeId, buildEnvelopeBytes(msg)) } catch (_: Exception) {}
         return msg
     }
 
