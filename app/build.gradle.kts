@@ -5,6 +5,15 @@ plugins {
 }
 
 android {
+    signingConfigs {
+        create("release") {
+            storeFile = file("C:/Users/ezumb/exergynet-release.jks")
+            storePassword = System.getenv("EXERGYNET_STORE_PASS") ?: ""
+            keyAlias = "exergynet"
+            keyPassword = System.getenv("EXERGYNET_KEY_PASS") ?: ""
+        }
+    }
+
     namespace = "com.exergynet.myapplication"
     compileSdk {
         version = release(36) {
@@ -16,8 +25,8 @@ android {
         applicationId = "com.exergynet.myapplication"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 20
+        versionName = "1.5.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -29,6 +38,17 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // (B) Wire the release signingConfig so `gradlew assembleRelease` can
+            // produce a *signed* APK from the CLI. Requires the keystore passwords
+            // in the environment: EXERGYNET_STORE_PASS and EXERGYNET_KEY_PASS.
+            // Falls back gracefully: if the store password env var is unset, leave
+            // the build unsigned rather than failing configuration (lets debug
+            // builds and CI lint run without secrets present).
+            signingConfig = if (System.getenv("EXERGYNET_STORE_PASS").isNullOrEmpty()) {
+                null
+            } else {
+                signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {

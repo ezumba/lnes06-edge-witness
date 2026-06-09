@@ -164,6 +164,9 @@
         .job-count-row span{font-size:12px;color:var(--app-muted)}
         .modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.58);z-index:80;align-items:flex-end;justify-content:center;padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));backdrop-filter:blur(5px)}
         .modal-backdrop.active{display:flex}
+        /* Drop sheet must sit ABOVE the fullscreen Streets map (z 9800), else the
+           "+ Drop" button from the full map opens the sheet behind the map. */
+        #drop-sheet-backdrop{z-index:9900}
         .modal-card{width:100%;max-width:480px;background:var(--app-card);border:.5px solid var(--app-border);border-radius:22px;padding:16px;box-shadow:0 -20px 60px rgba(0,0,0,.45)}
         .modal-title{font-size:18px;font-weight:750;color:var(--app-text);margin-bottom:6px}
         .modal-body{font-size:13px;color:var(--app-muted);line-height:1.45;margin-bottom:14px}
@@ -1659,10 +1662,10 @@
     </div>
 
     <!-- NODE BOOK add/save sheet -->
-    <div id="nodebook-sheet" style="display:none;position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.55);align-items:flex-end;justify-content:center" onclick="if(event.target===this)closeNodeBookSheet()">
+    <div id="nodebook-sheet" style="display:none;position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.55);align-items:flex-end;justify-content:center" onclick="if(event.target===this)closeNodeBookSheet()">
         <div style="width:100%;max-width:520px;background:var(--app-bg);border-top-left-radius:18px;border-top-right-radius:18px;border:.5px solid var(--app-border);padding:18px 18px calc(20px + env(safe-area-inset-bottom))">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-                <span style="font-size:17px;font-weight:700;color:var(--app-text)">Save to Node Book</span>
+                <span id="nb-sheet-title" style="font-size:17px;font-weight:700;color:var(--app-text)">Save to Node Book</span>
                 <i class="ti ti-x" style="font-size:22px;color:var(--app-muted);cursor:pointer" onclick="closeNodeBookSheet()"></i>
             </div>
             <label style="font-size:12px;color:var(--app-muted);display:block;margin-bottom:4px">Node ID (cryptographic identity)</label>
@@ -1672,6 +1675,35 @@
             <input id="nb-alias" type="text" placeholder="e.g. Berlin-Relay-1"
                 style="width:100%;background:var(--app-surface);border:.5px solid var(--app-border);border-radius:10px;padding:11px 12px;font-size:14px;color:var(--app-text);outline:none;margin-bottom:16px;-webkit-user-select:text;user-select:text">
             <button onclick="submitNodeBook()" class="btn-primary" style="width:100%"><i class="ti ti-device-floppy"></i> Save Node</button>
+        </div>
+    </div>
+
+    <!-- NODE detail screen (dialer-style "Node info" — tap a node's name) -->
+    <div id="node-detail" style="display:none;position:fixed;inset:0;z-index:65;background:var(--app-bg);flex-direction:column">
+        <div style="display:flex;align-items:center;gap:14px;padding:16px;border-bottom:.5px solid var(--app-border)">
+            <i class="ti ti-arrow-left" style="font-size:24px;color:var(--app-text);cursor:pointer" onclick="closeNodeDetail()"></i>
+            <span style="font-size:19px;font-weight:700;color:var(--app-text)">Node info</span>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:center;padding:28px 16px 8px">
+            <div id="nd-avatar" style="width:96px;height:96px;border-radius:50%;background:rgba(0,232,135,.12);border:2px solid rgba(0,232,135,.3);display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:700;color:var(--app-teal)">N</div>
+            <div id="nd-name" style="font-size:24px;font-weight:600;color:var(--app-text);margin-top:14px;text-align:center;padding:0 24px"></div>
+            <div id="nd-id" style="font-size:13px;color:var(--app-muted);font-family:monospace;margin-top:4px;word-break:break-all;text-align:center;padding:0 24px"></div>
+        </div>
+        <div style="display:flex;gap:12px;padding:18px 16px 6px">
+            <div onclick="nodeDetailMessage()" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;border:.5px solid var(--app-border);border-radius:12px;cursor:pointer;-webkit-tap-highlight-color:transparent">
+                <i class="ti ti-message-2" style="font-size:24px;color:var(--app-teal)"></i><span style="font-size:13px;color:var(--app-text)">Message</span>
+            </div>
+            <div onclick="nodeDetailCall()" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;border:.5px solid var(--app-border);border-radius:12px;cursor:pointer;-webkit-tap-highlight-color:transparent">
+                <i class="ti ti-phone" style="font-size:24px;color:var(--app-teal)"></i><span style="font-size:13px;color:var(--app-text)">Call</span>
+            </div>
+            <div onclick="nodeDetailEdit()" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;border:.5px solid var(--app-border);border-radius:12px;cursor:pointer;-webkit-tap-highlight-color:transparent">
+                <i class="ti ti-edit" style="font-size:24px;color:var(--app-muted)"></i><span style="font-size:13px;color:var(--app-text)">Edit name</span>
+            </div>
+        </div>
+        <div style="padding:16px">
+            <div onclick="nodeDetailDelete()" style="display:flex;align-items:center;gap:10px;padding:14px 12px;cursor:pointer;-webkit-tap-highlight-color:transparent">
+                <i class="ti ti-trash" style="font-size:20px;color:var(--app-red)"></i><span style="font-size:15px;color:var(--app-red)">Remove from Node Book</span>
+            </div>
         </div>
     </div>
 
@@ -1796,14 +1828,26 @@
             </div>
         </div>
         <div id="messages-list" style="flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scrollbar-width:none"></div>
-        <div style="flex-shrink:0;padding:8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom));background:var(--app-surface);border-top:.5px solid var(--app-border);display:flex;align-items:flex-end;gap:8px">
-            <div style="flex:1;background:var(--app-bg);border:.5px solid var(--app-border);border-radius:22px;display:flex;align-items:center;padding:0 12px;min-height:44px">
-                <input id="msg-input" placeholder="Message…" style="flex:1;background:transparent;border:none;outline:none;font-size:14px;color:var(--app-text);font-family:inherit;-webkit-user-select:text;user-select:text;padding:10px 0"
-                    onkeydown="if(event.key==='Enter')sendMessage()">
+        <div style="flex-shrink:0;padding:8px 12px;padding-bottom:calc(8px + env(safe-area-inset-bottom));background:var(--app-surface);border-top:.5px solid var(--app-border)">
+            <div id="reply-banner" style="display:none;align-items:center;gap:8px;background:var(--app-bg);border-left:3px solid var(--app-teal);border-radius:8px;padding:6px 10px;margin-bottom:8px">
+                <div style="flex:1;min-width:0"><div style="font-size:10px;color:var(--app-teal);font-weight:700">Replying</div><div id="reply-preview" style="font-size:12px;color:var(--app-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div></div>
+                <i class="ti ti-x" onclick="clearReply()" style="font-size:16px;color:var(--app-muted);cursor:pointer"></i>
             </div>
-            <button onclick="sendMessage()" style="width:44px;height:44px;border-radius:50%;background:var(--app-teal);border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">
-                <i class="ti ti-send" style="color:#0D1117;font-size:18px;margin-left:2px"></i>
-            </button>
+            <div style="display:flex;align-items:flex-end;gap:8px">
+                <button onclick="attachImage()" title="Take photo" style="width:44px;height:44px;border-radius:50%;background:var(--app-card);border:.5px solid var(--app-border);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">
+                    <i class="ti ti-camera" style="color:var(--app-teal);font-size:18px"></i>
+                </button>
+                <button onclick="pickImageFromGallery()" title="Choose from gallery" style="width:44px;height:44px;border-radius:50%;background:var(--app-card);border:.5px solid var(--app-border);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">
+                    <i class="ti ti-photo" style="color:var(--app-muted);font-size:18px"></i>
+                </button>
+                <div style="flex:1;background:var(--app-bg);border:.5px solid var(--app-border);border-radius:22px;display:flex;align-items:center;padding:0 12px;min-height:44px">
+                    <input id="msg-input" placeholder="Message…" style="flex:1;background:transparent;border:none;outline:none;font-size:14px;color:var(--app-text);font-family:inherit;-webkit-user-select:text;user-select:text;padding:10px 0"
+                        onkeydown="if(event.key==='Enter')sendMessage()">
+                </div>
+                <button onclick="sendMessage()" style="width:44px;height:44px;border-radius:50%;background:var(--app-teal);border:none;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0">
+                    <i class="ti ti-send" style="color:#0D1117;font-size:18px;margin-left:2px"></i>
+                </button>
+            </div>
         </div>
     </div>
 
@@ -4244,8 +4288,12 @@ function onDLTNContactsLoaded(json) {
   rows.innerHTML = dltnContacts.map(c => {
     const initial = (c.displayName || 'N')[0].toUpperCase();
     const ago = _timeAgo(c.lastSeenMs);
+    const online = c.lastSeenMs && (Date.now() - c.lastSeenMs < 120000);
     return `<div onclick="openConversation('${c.nodeId}','${c.displayName}')" style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:.5px solid var(--app-border);cursor:pointer;-webkit-tap-highlight-color:transparent" onmousedown="this.style.background='var(--app-card)'" onmouseup="this.style.background=''" ontouchstart="this.style.background='var(--app-card)'" ontouchend="this.style.background=''">
-      <div style="width:50px;height:50px;border-radius:50%;background:rgba(0,232,135,.1);border:1.5px solid rgba(0,232,135,.25);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:18px;font-weight:700;color:var(--app-teal)">${initial}</div>
+      <div style="position:relative;flex-shrink:0">
+        <div style="width:50px;height:50px;border-radius:50%;background:rgba(0,232,135,.1);border:1.5px solid rgba(0,232,135,.25);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--app-teal)">${initial}</div>
+        <span title="${online?'in range':'last seen '+ago}" style="position:absolute;bottom:1px;right:1px;width:12px;height:12px;border-radius:50%;border:2px solid var(--app-bg);background:${online?'#22e887':'#5a6b7a'}"></span>
+      </div>
       <div style="flex:1;min-width:0">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
           <span style="font-size:15px;font-weight:600;color:var(--app-text)">${c.displayName}</span>
@@ -4268,6 +4316,11 @@ function _timeAgo(ms) {
 
 function openConversation(nodeId, displayName) {
   currentConvNodeId = nodeId;
+  // conversation-view lives inside the #s-messages screen, which is only visible
+  // when that screen is active. If opened from elsewhere (e.g. the Node info
+  // screen), activate s-messages first or the view stays hidden behind the
+  // current screen.
+  if (typeof go === 'function') go('s-messages');
   const cv = document.getElementById('conversation-view');
   if (cv) { cv.style.display = 'flex'; }
   document.getElementById('conv-peer-name').textContent = displayName;
@@ -4275,6 +4328,10 @@ function openConversation(nodeId, displayName) {
   document.getElementById('messages-list').innerHTML = '<div style="text-align:center;padding:20px;color:var(--app-muted);font-size:12px">Loading…</div>';
   if (window.ExergyKinesis && window.ExergyKinesis.getDLTNConversation) {
     window.ExergyKinesis.getDLTNConversation(nodeId);
+  }
+  clearReply();
+  if (window.ExergyKinesis && window.ExergyKinesis.markConversationRead) {
+    window.ExergyKinesis.markConversationRead(nodeId);
   }
 }
 
@@ -4284,9 +4341,35 @@ function closeConversation() {
   if (cv) cv.style.display = 'none';
 }
 
+function _esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+// BUG 2 FIX: atob() returns a Latin-1 byte string — UTF-8 multibyte chars
+// (emoji, accents) corrupt into mojibake ("🤙" → "ðŸ¤™"). Re-interpret the
+// raw bytes as UTF-8 so message content renders correctly.
+function _b64utf8(b64){ try { return decodeURIComponent(escape(atob(b64))); } catch(e){ try { return atob(b64); } catch(_){ return b64; } } }
+
+// Called by MainActivity.messageReceiver whenever the service delivers a new inbound message.
+// If the sender matches the currently open conversation, reload it instantly.
+function onDLTNMessageReceived(fromNodeId, type) {
+  // Never trigger a conversation refresh for call control signals.
+  const CALL_SIGS = ['call_invite','call_accept','call_reject','call_end'];
+  if (CALL_SIGS.includes(type)) return;
+  if (currentConvNodeId === fromNodeId && window.ExergyKinesis && window.ExergyKinesis.getDLTNConversation) {
+    window.ExergyKinesis.getDLTNConversation(fromNodeId);
+  }
+}
+
 function onDLTNConversationLoaded(json) {
   let msgs = [];
   try { msgs = JSON.parse(json); } catch(e) {}
+  // Strip call-control signals that leaked through — they are transport-layer
+  // artifacts and must never appear as chat bubbles.
+  const CALL_SIGS = ['call_invite','call_accept','call_reject','call_end'];
+  msgs = msgs.filter(m => !CALL_SIGS.includes(m.type));
+  window._convMsgs = msgs;
+  const byId = {}; msgs.forEach(m => byId[m.id] = m);
+  const isImg = t => t === 'image' || t === 'image_proof';
+  const snippet = m => { try { return isImg(m.type) ? '📷 Photo' : _b64utf8(m.content).slice(0,60); } catch(e){ return '[message]'; } };
   const list = document.getElementById('messages-list');
   if (!list) return;
   if (!msgs.length) {
@@ -4295,13 +4378,26 @@ function onDLTNConversationLoaded(json) {
   }
   list.innerHTML = msgs.map(m => {
     const out = m.direction === 'outbound';
-    let text;
-    try { text = m.type === 'text' ? atob(m.content) : '[' + m.type + ']'; } catch(e) { text = m.content; }
+    let body;
+    if (isImg(m.type)) {
+      body = `<img src="data:image/jpeg;base64,${_esc(m.content)}" style="max-width:200px;max-height:240px;border-radius:10px;display:block" alt="image">`;
+    } else {
+      let text; try { text = _b64utf8(m.content); } catch(e){ text = m.content; }
+      body = `<div style="font-size:14px;color:var(--app-text);line-height:1.4;white-space:pre-wrap;word-break:break-word">${_esc(text)}</div>`;
+    }
+    let quote = '';
+    if (m.replyToId && byId[m.replyToId]) {
+      quote = `<div style="border-left:2px solid var(--app-teal);padding:3px 8px;margin-bottom:5px;background:rgba(0,232,135,.06);border-radius:5px;font-size:11px;color:var(--app-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_esc(snippet(byId[m.replyToId]))}</div>`;
+    }
     const time = new Date(m.timestampMs).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
     return `<div style="display:flex;flex-direction:column;align-items:${out?'flex-end':'flex-start'}">
       <div style="max-width:78%;background:${out?'rgba(0,232,135,.18)':'var(--app-card)'};border:.5px solid ${out?'rgba(0,232,135,.4)':'var(--app-border)'};border-radius:${out?'16px 16px 4px 16px':'16px 16px 16px 4px'};padding:9px 13px">
-        <div style="font-size:14px;color:var(--app-text);line-height:1.4">${text}</div>
+        ${quote}${body}
         <div style="font-size:10px;color:var(--app-muted);margin-top:3px;text-align:right">${time}${out ? (m.delivered ? ' ✓✓' : ' ✓') : ''}</div>
+      </div>
+      <div style="display:flex;gap:14px;margin:2px 6px 0;font-size:11px;color:var(--app-hint)">
+        <span onclick="setReply('${m.id}')" style="cursor:pointer"><i class="ti ti-arrow-back-up" style="font-size:12px"></i> Reply</span>
+        <span onclick="forwardMessage('${m.id}')" style="cursor:pointer"><i class="ti ti-arrow-forward-up" style="font-size:12px"></i> Forward</span>
       </div>
     </div>`;
   }).join('');
@@ -4312,16 +4408,81 @@ function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = (input && input.value.trim()) || '';
   if (!text || !currentConvNodeId) return;
-  if (window.ExergyKinesis && window.ExergyKinesis.sendDLTNMessage) {
+  const replyTo = window._replyingTo || '';
+  if (replyTo && window.ExergyKinesis && window.ExergyKinesis.replyDLTNMessage) {
+    window.ExergyKinesis.replyDLTNMessage(currentConvNodeId, text, replyTo);
+  } else if (window.ExergyKinesis && window.ExergyKinesis.sendDLTNMessage) {
     window.ExergyKinesis.sendDLTNMessage(currentConvNodeId, text);
   }
   input.value = '';
+  clearReply();
 }
 
 function onDLTNMessageQueued(id, toNodeId) {
   if (currentConvNodeId === toNodeId) {
     window.ExergyKinesis && window.ExergyKinesis.getDLTNConversation(toNodeId);
   }
+}
+
+// ── Reply / Forward / Image / Unread (Batch 3) ──────────────────────────────
+function setReply(id) {
+  const m = (window._convMsgs || []).find(x => x.id === id);
+  if (!m) return;
+  window._replyingTo = id;
+  let prev; try { prev = (m.type === 'image' || m.type === 'image_proof') ? '📷 Photo' : _b64utf8(m.content); } catch(e){ prev = '[message]'; }
+  const banner = document.getElementById('reply-banner');
+  const pv = document.getElementById('reply-preview');
+  if (pv) pv.textContent = prev.slice(0, 80);
+  if (banner) banner.style.display = 'flex';
+  const input = document.getElementById('msg-input'); if (input) input.focus();
+}
+function clearReply() {
+  window._replyingTo = null;
+  const banner = document.getElementById('reply-banner');
+  if (banner) banner.style.display = 'none';
+}
+function forwardMessage(id) {
+  window._forwarding = id;
+  const contacts = (typeof dltnContacts !== 'undefined' && dltnContacts) ? dltnContacts : [];
+  if (!contacts.length) { showToast('No mesh peers to forward to', 'warn'); return; }
+  const rows = contacts.map(c =>
+    `<div onclick="doForward('${c.nodeId}')" style="padding:13px 16px;border-bottom:.5px solid var(--app-border);cursor:pointer;font-size:14px;color:var(--app-text)">${_esc(c.displayName)} <span style="font-size:11px;color:var(--app-muted);font-family:monospace">${_esc(c.nodeId)}</span></div>`
+  ).join('');
+  let ov = document.getElementById('fwd-overlay');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'fwd-overlay'; document.body.appendChild(ov); }
+  ov.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);display:flex;flex-direction:column;justify-content:flex-end';
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="background:var(--app-surface);border-radius:18px 18px 0 0;max-height:70vh;overflow-y:auto">
+    <div style="padding:14px 16px;font-weight:700;color:var(--app-text);border-bottom:.5px solid var(--app-border)">Forward to…</div>${rows}</div>`;
+  ov.onclick = closeForward;
+}
+function doForward(nodeId) {
+  if (window._forwarding && window.ExergyKinesis && window.ExergyKinesis.forwardDLTNMessage) {
+    window.ExergyKinesis.forwardDLTNMessage(window._forwarding, nodeId);
+    showToast('Forwarded', 'ok');
+  }
+  closeForward();
+}
+function closeForward() { const ov = document.getElementById('fwd-overlay'); if (ov) ov.remove(); window._forwarding = null; }
+function attachImage() {
+  if (!currentConvNodeId) return;
+  if (window.ExergyKinesis && window.ExergyKinesis.captureMessageImage) {
+    window.ExergyKinesis.captureMessageImage();
+  } else { showToast('Image capture unavailable', 'warn'); }
+}
+function pickImageFromGallery() {
+  if (!currentConvNodeId) return;
+  if (window.ExergyKinesis && window.ExergyKinesis.pickMessageImageFromGallery) {
+    window.ExergyKinesis.pickMessageImageFromGallery();
+  } else { showToast('Gallery unavailable', 'warn'); }
+}
+function onMessageImageReady(b64) {
+  if (currentConvNodeId && window.ExergyKinesis && window.ExergyKinesis.sendDLTNImage) {
+    window.ExergyKinesis.sendDLTNImage(currentConvNodeId, b64);
+  }
+}
+function onDLTNUnreadCount(n) {
+  const badge = document.getElementById('msg-unread-badge');
+  if (badge) { badge.textContent = n > 0 ? String(n) : ''; badge.style.display = n > 0 ? 'inline-flex' : 'none'; }
 }
 
 function showAddContact() {
@@ -4362,6 +4523,51 @@ function loadNodeBook() {
 function onNodeBookLoaded(json) {
   try { window._nodeBook = JSON.parse(json); } catch(e) { window._nodeBook = []; }
   renderNodeBook();
+  // If the detail screen is open (e.g. after editing the name), refresh it so the
+  // updated alias shows without the user having to back out and re-tap.
+  var det = document.getElementById('node-detail');
+  if (det && det.style.display === 'flex' && window._detailNodeId) openNodeDetail(window._detailNodeId);
+}
+
+// ── Node detail screen (dialer-style "Node info") ───────────────────────────
+function openNodeDetail(nodeId) {
+  if (!nodeId) return;
+  var n = (window._nodeBook || []).find(function(x){ return String(x.nodeId) === String(nodeId); });
+  window._detailNodeId = nodeId;
+  var name = (n && n.alias) ? n.alias : _truncId(nodeId);
+  var avatar = document.getElementById('nd-avatar');
+  var nameEl = document.getElementById('nd-name');
+  var idEl   = document.getElementById('nd-id');
+  if (avatar) avatar.textContent = (name || 'N')[0].toUpperCase();
+  if (nameEl) nameEl.textContent = name;
+  if (idEl)   idEl.textContent = nodeId;
+  var det = document.getElementById('node-detail');
+  if (det) det.style.display = 'flex';
+}
+function closeNodeDetail() {
+  var det = document.getElementById('node-detail');
+  if (det) det.style.display = 'none';
+}
+function nodeDetailMessage() {
+  var id = window._detailNodeId; if (!id) return;
+  var n = (window._nodeBook || []).find(function(x){ return String(x.nodeId) === String(id); });
+  var name = (n && n.alias) ? n.alias : _truncId(id);
+  closeNodeDetail();
+  openConversation(id, name);
+}
+function nodeDetailCall() {
+  var id = window._detailNodeId; if (!id) return;
+  closeNodeDetail();
+  dltnCall(id);
+}
+function nodeDetailEdit() {
+  var id = window._detailNodeId; if (!id) return;
+  openNodeBookSheet(id);   // sheet opens over the detail screen, alias prefilled
+}
+function nodeDetailDelete() {
+  var id = window._detailNodeId; if (!id) return;
+  closeNodeDetail();
+  removeFromNodeBook(id);
 }
 
 function renderNodeBook() {
@@ -4381,7 +4587,7 @@ function renderNodeBook() {
     var initial   = (n.alias || 'N')[0].toUpperCase();
     return '<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:.5px solid var(--app-border)">' +
       '<div style="width:46px;height:46px;border-radius:50%;background:rgba(0,232,135,.1);border:1.5px solid rgba(0,232,135,.25);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:18px;font-weight:700;color:var(--app-teal)">'+initial+'</div>' +
-      '<div style="flex:1;min-width:0;cursor:pointer" onclick="dltnCall(\''+safeId+'\')">' +
+      '<div style="flex:1;min-width:0;cursor:pointer" onclick="openNodeDetail(\''+safeId+'\')">' +
         '<div style="font-size:15px;font-weight:600;color:var(--app-text)">'+(n.alias || _truncId(n.nodeId))+'</div>' +
         '<div style="font-size:12px;color:var(--app-muted);font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+n.nodeId+'</div>' +
       '</div>' +
@@ -4396,7 +4602,12 @@ function openNodeBookSheet(prefillId) {
   var sheet = document.getElementById('nodebook-sheet');
   if (!sheet) return;
   document.getElementById('nb-node-id').value = prefillId || '';
-  document.getElementById('nb-alias').value = '';
+  // Edit mode: if this node is already saved, prefill its current alias and
+  // retitle the sheet so renaming an existing contact is obvious.
+  var existing = (window._nodeBook || []).find(function(n){ return String(n.nodeId) === String(prefillId); });
+  document.getElementById('nb-alias').value = (existing && existing.alias) ? existing.alias : '';
+  var titleEl = document.getElementById('nb-sheet-title');
+  if (titleEl) titleEl.textContent = existing ? 'Edit node name' : 'Save to Node Book';
   sheet.style.display = 'flex';
 }
 
@@ -4496,14 +4707,22 @@ function onNodeQrScanError(msg) { showToast('Scan failed: ' + (msg || ''), 'erro
 // ════════════════════════════════════════════════════════════
 // DLTN VOICE CALLS
 // ════════════════════════════════════════════════════════════
-// Sovereign mesh call — routes by miner_id over DLTN (Wi-Fi Aware / BLE), never cellular.
+// Sovereign mesh call — routes by miner_id over DLTN (TCP over WiFi / BLE), never cellular.
 function dltnCall(nodeId) {
   if (!nodeId) return;
+  // BUG 3 FIX: debounce the call button. Rapid repeated taps previously fired
+  // multiple initiateDltnCall() bridge calls before the engine flipped out of
+  // IDLE, queuing duplicate call_invite bubbles. Block re-entry for 3s; the
+  // window clears on the next onCallStateChanged (IDLE/ENDED) too.
+  if (window._dltnCallInFlight) return;
+  window._dltnCallInFlight = true;
+  setTimeout(() => { window._dltnCallInFlight = false; }, 3000);
   if (window.ExergyKinesis && window.ExergyKinesis.initiateDltnCall) {
     window.ExergyKinesis.initiateDltnCall(nodeId);
   } else if (window.ExergyKinesis && window.ExergyKinesis.initiateCall) {
     window.ExergyKinesis.initiateCall(nodeId);   // back-compat
   } else {
+    window._dltnCallInFlight = false;
     showToast('Mesh radio unavailable', 'warn');
   }
 }
@@ -4583,7 +4802,7 @@ function endCall() {
   hideCallScreen();
 }
 
-function onCallStateChanged(state, peer) {
+function onCallStateChanged(state, peer, dropped, reason) {
   const screen = document.getElementById('call-screen');
   const peerLbl  = document.getElementById('call-peer-label');
   const statusLbl = document.getElementById('call-status-label');
@@ -4591,7 +4810,21 @@ function onCallStateChanged(state, peer) {
   const timerLbl  = document.getElementById('call-timer-label');
   if (!screen) return;
   if (peerLbl) peerLbl.textContent = 'Node ' + peer;
-  if (state === 'IDLE' || state === 'ENDED') { hideCallScreen(); return; }
+  if (state === 'IDLE' || state === 'ENDED') {
+    window._dltnCallInFlight = false;
+    // TASK 3: an OS-severed drop is not a clean hang-up — tell the Architect the
+    // physics engine attempted the link and lost it, rather than silently going
+    // idle / disabling buttons.
+    if (dropped === true || dropped === 'true') {
+      showToast('Call dropped — connection lost.', 'warn');
+    } else if (reason === 'no_wifi') {
+      showToast('Connect to a Wi-Fi network to make calls.', 'warn');
+    } else if (reason === 'no_caller_address') {
+      showToast('Call setup failed — peer address missing.', 'warn');
+    }
+    hideCallScreen();
+    return;
+  }
   showCallScreen();
   if (state === 'RINGING') {
     if (statusLbl) statusLbl.textContent = 'Incoming call…';
@@ -4849,6 +5082,42 @@ window.onPositionSyncFailed = function(reason) {
   if (s) { s.textContent = 'Mesh solve unavailable (' + (reason || 'error') + ')'; s.style.color = 'var(--app-red)'; }
 };
 
+// ── Drop attachment (image inline; doc/video metadata) ───
+window._dropAttachment = null;
+
+function attachDropMedia() {
+  if (window.ExergyKinesis && window.ExergyKinesis.pickAttachment) {
+    window.ExergyKinesis.pickAttachment();
+  } else {
+    showToast('Attachments available in the app', 'warn');
+  }
+}
+
+function onAttachmentPicked(json) {
+  let a; try { a = JSON.parse(json); } catch(e) { return; }
+  if (a.error) { showToast('Attach failed: ' + a.error, 'error'); return; }
+  if (!a.dataB64) {
+    // doc/video: metadata only for now (mesh transport pending)
+    showToast((a.mime||'media').split('/')[0] + ' will sync over the mesh when supported', 'warn');
+  }
+  window._dropAttachment = a;
+  const chip  = document.getElementById('drop-attach-chip');
+  const thumb = document.getElementById('drop-attach-thumb');
+  const name  = document.getElementById('drop-attach-name');
+  if (chip)  chip.style.display = 'flex';
+  if (name)  name.textContent = (a.name || 'attachment') + (a.size ? '  ·  ' + Math.round(a.size/1024) + ' KB' : '');
+  if (thumb) {
+    if (a.dataB64 && (a.mime||'').startsWith('image/')) { thumb.src = 'data:' + a.mime + ';base64,' + a.dataB64; thumb.style.display = 'block'; }
+    else thumb.style.display = 'none';
+  }
+}
+
+function clearDropAttachment() {
+  window._dropAttachment = null;
+  const chip = document.getElementById('drop-attach-chip');
+  if (chip) chip.style.display = 'none';
+}
+
 // ── Drop sheet ───────────────────────────────────────────
 function openDropSheet() {
   document.getElementById('drop-sheet-backdrop')?.classList.add('active');
@@ -4856,6 +5125,7 @@ function openDropSheet() {
 
 function closeDropSheet() {
   document.getElementById('drop-sheet-backdrop')?.classList.remove('active');
+  clearDropAttachment();
   const inp = document.getElementById('drop-message-input');
   if (inp) inp.value = '';
   const gi = document.getElementById('drop-groups-input');
@@ -4886,8 +5156,9 @@ function sealDrop() {
     ? (document.getElementById('drop-groups-input')?.value.trim() || '')
     : '';
   const category = _dropCategory || 'INTEL';
+  const attachmentJson = JSON.stringify(window._dropAttachment || {});
   if (window.ExergyKinesis && window.ExergyKinesis.sealDeadDrop) {
-    window.ExergyKinesis.sealDeadDrop(message, _dropType, _userLat, _userLon, radiusM, ttlSecs, groups, category);
+    window.ExergyKinesis.sealDeadDrop(message, _dropType, _userLat, _userLon, radiusM, ttlSecs, groups, category, attachmentJson);
   } else {
     setTimeout(() => onDropSealed('DROP-SIM-' + Date.now()), 1500);
   }
@@ -4918,20 +5189,46 @@ window.onDropSealFailed = function(reason) {
   showToast('Seal failed: ' + reason, 'error');
 };
 
-window.onDropContentsReceived = function(dropId, contents) {
+// Renders an inline image attachment (tap → full-screen image viewer).
+function _dropAttachHtml(attB64, attMime) {
+  if (!attB64) return '';
+  if ((attMime || '').startsWith('image/')) {
+    const src = 'data:' + attMime + ';base64,' + attB64;
+    return `<img src="${src}" onclick="openImageViewer('${src}')" style="margin-top:14px;width:100%;border-radius:12px;cursor:zoom-in;border:.5px solid var(--app-border)">`;
+  }
+  return `<div style="margin-top:14px;font-size:13px;color:var(--app-muted)"><i class="ti ti-file"></i> Attachment (${attMime || 'file'})</div>`;
+}
+
+window.onDropContentsReceived = function(dropId, contents, attB64, attMime) {
+  const html = `<div style="font-size:16px;line-height:1.6;color:var(--app-text)">${contents}</div>` + _dropAttachHtml(attB64, attMime);
   // If drop-read-overlay is open, update it directly
   const overlay = document.getElementById('drop-read-overlay');
   const contentEl = document.getElementById('drop-read-content');
   if (overlay?.classList.contains('active') && contentEl) {
-    contentEl.innerHTML = `<div style="font-size:16px;line-height:1.6;color:var(--app-text)">${contents}</div>`;
+    contentEl.innerHTML = html;
   } else {
     showModal('Drop Contents',
       `<div style="font-size:13px;color:var(--app-muted);margin-bottom:8px">Drop ID: <span style="font-family:monospace">${dropId}</span></div>
-       <div style="font-size:15px;color:var(--app-text);line-height:1.5">${contents}</div>`,
+       <div style="font-size:15px;color:var(--app-text);line-height:1.5">${html}</div>`,
       [{ label:'Close', className:'btn-primary', onclick:'closeModal()' }]
     );
   }
 };
+
+// Full-screen image viewer (pinch/tap to dismiss).
+function openImageViewer(src) {
+  let v = document.getElementById('image-viewer');
+  if (!v) {
+    v = document.createElement('div');
+    v.id = 'image-viewer';
+    v.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.94);display:flex;align-items:center;justify-content:center;padding:12px';
+    v.onclick = () => { v.style.display = 'none'; };
+    v.innerHTML = '<img id="image-viewer-img" style="max-width:100%;max-height:100%;border-radius:8px">';
+    document.body.appendChild(v);
+  }
+  document.getElementById('image-viewer-img').src = src;
+  v.style.display = 'flex';
+}
 
 // ════════════════════════════════════════════════════════
 // JOBS LEAFLET MAP
@@ -5074,11 +5371,16 @@ function renderDropMarkersOnMap(drops, layerGroup, allowRead) {
     const distM   = getDistanceM(_userLat, _userLon, drop.lat, drop.lon);
     const inRange = distM <= drop.radius;
 
+    // TIME-DECAY: older intel recedes toward the background but is NEVER removed —
+    // as new drops arrive the fresh ones stand out, the old persist faintly.
+    const op = _dropAgeOpacity(drop);   // 1.0 (fresh) → 0.3 (old, floored)
+    const sz = 22 + Math.round(10 * op); // fresh markers a touch larger
+
     const icon = L.divIcon({
-      html: `<div style="font-size:28px;line-height:1;filter:drop-shadow(0 2px 4px rgba(0,0,0,.5))">${emoji}</div>`,
+      html: `<div style="font-size:${sz}px;line-height:1;opacity:${op};filter:drop-shadow(0 2px 4px rgba(0,0,0,${0.5*op}))">${emoji}</div>`,
       iconSize: [32, 32], iconAnchor: [16, 32], className: '',
     });
-    const marker = L.marker([drop.lat, drop.lon], { icon });
+    const marker = L.marker([drop.lat, drop.lon], { icon, zIndexOffset: Math.round(op * 1000) });
     const expiryStr = drop.expiresMs
       ? 'Expires ' + new Date(drop.expiresMs).toLocaleTimeString()
       : 'No expiry';
@@ -5110,11 +5412,23 @@ function renderDropMarkersOnMap(drops, layerGroup, allowRead) {
 
     L.circle([drop.lat, drop.lon], {
       radius: drop.radius, color, fillColor: color,
-      fillOpacity: 0.07, weight: 1, dashArray: '4 4',
+      fillOpacity: 0.07 * op, opacity: 0.6 * op, weight: 1, dashArray: '4 4',
     }).addTo(layerGroup);
 
     layerGroup.addLayer(marker);
   });
+}
+
+// Age → opacity. Uses createdMs/timestamp when present; floor 0.3 so a drop fades
+// into the background over ~7 days but is NEVER gone. (Off-grid bulletin board:
+// censorship-resistant memory — old intel persists even as new arrives.)
+function _dropAgeOpacity(drop) {
+  const created = drop.createdMs || drop.timestamp || (drop.timestampMs) || null;
+  if (!created) return 1.0;
+  const ageMs = Date.now() - (created < 1e12 ? created * 1000 : created); // sec or ms
+  const WEEK  = 7 * 24 * 3600 * 1000;
+  const t = Math.max(0, Math.min(1, ageMs / WEEK));
+  return Math.max(0.3, 1 - 0.7 * t);
 }
 
 // ── Drop Read Full-Screen Overlay ─────────────────────────────────────────
@@ -5730,6 +6044,16 @@ function _trackDropInteraction(dropId, action, drop) {
     <textarea id="drop-message-input" rows="3"
       placeholder="Intel to drop at this location..."
       style="width:100%;background:var(--app-surface);border:.5px solid var(--app-border);border-radius:10px;padding:10px 12px;font-size:14px;color:var(--app-text);resize:none;outline:none;font-family:inherit;-webkit-user-select:text;user-select:text"></textarea>
+
+    <!-- Attachment (image inline; document/video via mesh) -->
+    <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+      <button onclick="attachDropMedia()" class="btn-secondary" style="flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;padding:8px 12px"><i class="ti ti-paperclip"></i> Attach</button>
+      <div id="drop-attach-chip" style="display:none;flex:1;min-width:0;align-items:center;gap:8px">
+        <img id="drop-attach-thumb" style="width:34px;height:34px;border-radius:6px;object-fit:cover;display:none;flex:0 0 auto">
+        <span id="drop-attach-name" style="flex:1;min-width:0;font-size:12px;color:var(--app-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+        <i class="ti ti-x" onclick="clearDropAttachment()" style="cursor:pointer;color:var(--app-muted);flex:0 0 auto"></i>
+      </div>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0">
       <div>
         <p style="font-size:12px;color:var(--app-muted);margin-bottom:4px">Expires in</p>
