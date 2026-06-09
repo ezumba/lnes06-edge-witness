@@ -61,11 +61,13 @@ class MainActivity : FragmentActivity() {
     private var capturedOpticalBytes: ByteArray? = null
     private var tempImageUri: Uri? = null
     private var isProfileCapture: Boolean = false
+    private var isMessageCapture: Boolean = false   // Batch 3: camera → DLTN image message
 
     // STABILITY PATCH: Process Death Management
     private var webViewReady = false
     private var pendingImageHash: String? = null
-    private val CAMERA_REQUEST_CODE = 1001
+    private val CAMERA_REQUEST_CODE  = 1001
+    private val GALLERY_REQUEST_CODE = 1002
 
     // GPS position cache for dead drop proximity checks
     private var currentLat: Double = 39.7776
@@ -76,12 +78,24 @@ class MainActivity : FragmentActivity() {
     private val BALANCE_POLL_INTERVAL_MS = 30_000L // Poll RPC every 30 seconds max
     private var cachedBalanceUsd = -1.0
 
+    // DLTN inbound message receiver — refreshes the open conversation in real time
+    private val messageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val fromNodeId = intent?.getStringExtra("fromNodeId") ?: return
+            val type       = intent.getStringExtra("type") ?: ""
+            callJs("onDLTNMessageReceived", fromNodeId, type)
+        }
+    }
+
     // DLTN call state receiver
     private val callStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val state = intent?.getStringExtra("state") ?: return
             val peer  = intent.getStringExtra("peer") ?: ""
-            callJs("onCallStateChanged", state, peer.take(8))
+            // TASK 3: true when the OS severed the socket mid-call (not a hang-up).
+            val dropped = intent.getBooleanExtra("dropped", false)
+            val reason  = intent.getStringExtra("reason") ?: ""
+            callJs("onCallStateChanged", state, peer.take(8), dropped, reason)
         }
     }
 
@@ -89,6 +103,13 @@ class MainActivity : FragmentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         tempImageUri?.let { outState.putString("TEMP_IMAGE_URI", it.toString()) }
+    }
+
+    // Drop-Intel attachment picker (image/video/document). Images are downscaled +
+    // base64'd for inline transport; large media returns metadata only (mesh-chunked
+    // transport is a follow-up). Result → JS via onAttachmentPicked.
+    private val pickAttachmentLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) processAttachment(uri)
     }
 
     private val requestPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -238,6 +259,10 @@ class MainActivity : FragmentActivity() {
         val callFilter = IntentFilter("com.exergynet.DLTN_CALL_STATE")
         registerReceiver(callStateReceiver, callFilter, RECEIVER_NOT_EXPORTED)
 
+        // Register DLTN inbound message receiver so conversations auto-refresh
+        val msgFilter = IntentFilter("com.exergynet.DLTN_MESSAGE_RECEIVED")
+        registerReceiver(messageReceiver, msgFilter, RECEIVER_NOT_EXPORTED)
+
         // AGENT DIRECTIVE: Live State Synapse (Kotlin -> JS)
         lifecycleScope.launch(Dispatchers.IO) {
             val db = ExergyDatabase.getDatabase(this@MainActivity)
@@ -303,6 +328,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onDestroy() {
         try { unregisterReceiver(callStateReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(messageReceiver)   } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -312,6 +338,20 @@ class MainActivity : FragmentActivity() {
 
         if (requestCode == CAMERA_REQUEST_CODE) {
             if (resultCode == RESULT_OK && tempImageUri != null) {
+                if (isMessageCapture) {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        try {
+                            val inputStream = contentResolver.openInputStream(tempImageUri!!)
+                            val jpegBytes = inputStream?.readBytes() ?: ByteArray(0)
+                            inputStream?.close()
+                            val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+                            withContext(Dispatchers.Main) { callJs("onMessageImageReady", base64) }
+                        } catch (e: Exception) {
+                            sendToLog(">>> [DLTN] Message image read failed: ${e.message}")
+                        } finally { isMessageCapture = false }
+                    }
+                    return
+                }
                 if (isProfileCapture) {
                     sendToLog("[PROFILE] New profile picture captured. Optimizing...")
                     lifecycleScope.launch(Dispatchers.IO) {
@@ -379,6 +419,22 @@ class MainActivity : FragmentActivity() {
             } else {
                 sendToLog(">>> [ERROR] Optical capture failed or was aborted.")
             }
+        }
+
+        if (requestCode == GALLERY_REQUEST_CODE && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    val inputStream = contentResolver.openInputStream(uri)
+                    val jpegBytes = inputStream?.readBytes() ?: ByteArray(0)
+                    inputStream?.close()
+                    val base64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+                    withContext(Dispatchers.Main) { callJs("onMessageImageReady", base64) }
+                } catch (e: Exception) {
+                    sendToLog(">>> [DLTN] Gallery image read failed: ${e.message}")
+                } finally { isMessageCapture = false }
+            }
+            return
         }
     }
 
@@ -725,6 +781,7 @@ class MainActivity : FragmentActivity() {
 
                     val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
                     intent.putExtra(MediaStore.EXTRA_OUTPUT, tempImageUri)
+                    intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
                     startActivityForResult(intent, CAMERA_REQUEST_CODE)
 
                 } catch (e: Exception) {
@@ -1082,6 +1139,102 @@ class MainActivity : FragmentActivity() {
             }
         }
 
+        // Capture a photo for a DLTN image message → onMessageImageReady(base64).
+        @JavascriptInterface
+        fun captureMessageImage() {
+            isMessageCapture = true
+            runOnUiThread {
+                try {
+                    val imagesDir = File(cacheDir, "exergy_images").apply { mkdirs() }
+                    val imageFile = File.createTempFile("exergy_msg_", ".jpg", imagesDir)
+                    tempImageUri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", imageFile)
+                    val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                    intent.putExtra(MediaStore.EXTRA_OUTPUT, tempImageUri)
+                    // FileProvider URIs require explicit write permission granted to the
+                    // camera app — without this flag Android blocks the write and the
+                    // camera process crashes, surfacing as "LNES-06 keeps stopping".
+                    intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    startActivityForResult(intent, CAMERA_REQUEST_CODE)
+                } catch (e: Exception) {
+                    sendToLog(">>> [DLTN] Message camera failed: ${e.message}")
+                    isMessageCapture = false
+                }
+            }
+        }
+
+        // Pick an existing image from the gallery for a message.
+        @JavascriptInterface
+        fun pickMessageImageFromGallery() {
+            isMessageCapture = true
+            runOnUiThread {
+                try {
+                    val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                        type = "image/*"
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                    }
+                    startActivityForResult(Intent.createChooser(intent, "Choose image"), GALLERY_REQUEST_CODE)
+                } catch (e: Exception) {
+                    sendToLog(">>> [DLTN] Gallery picker failed: ${e.message}")
+                    isMessageCapture = false
+                }
+            }
+        }
+
+        // Reply to a specific message (threads via replyToId).
+        @JavascriptInterface
+        fun replyDLTNMessage(toNodeId: String, text: String, replyToId: String) {
+            val svc = getDLTNService() ?: return
+            lifecycleScope.launch(Dispatchers.IO) {
+                val msg = svc.messenger.sendText(toNodeId, text, replyToId.ifEmpty { null })
+                callJs("onDLTNMessageQueued", msg.id, msg.toNodeId)
+            }
+        }
+
+        // Send an image (base64 JPEG from the UI) to a mesh node. Large images
+        // realistically transfer only over the WiFi-Aware bridge, not BLE MTU.
+        @JavascriptInterface
+        fun sendDLTNImage(toNodeId: String, base64Jpeg: String) {
+            val svc = getDLTNService() ?: return
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    val jpeg = Base64.decode(base64Jpeg, Base64.NO_WRAP)
+                    val msg = svc.messenger.sendImage(toNodeId, jpeg, registerOnL0 = true)
+                    callJs("onDLTNMessageQueued", msg.id, msg.toNodeId)
+                } catch (e: Exception) {
+                    sendToLog(">>> [DLTN] Image send failed: ${e.message}")
+                }
+            }
+        }
+
+        // Forward an existing message (text or image) to another node.
+        @JavascriptInterface
+        fun forwardDLTNMessage(messageId: String, toNodeId: String) {
+            val svc = getDLTNService() ?: return
+            lifecycleScope.launch(Dispatchers.IO) {
+                val msg = svc.messenger.forwardMessage(messageId, toNodeId)
+                if (msg != null) callJs("onDLTNMessageQueued", msg.id, msg.toNodeId)
+                else sendToLog(">>> [DLTN] Forward failed: message $messageId not found")
+            }
+        }
+
+        // Mark a conversation read (clears unread badge) + report unread total.
+        @JavascriptInterface
+        fun markConversationRead(nodeId: String) {
+            val svc = getDLTNService() ?: return
+            lifecycleScope.launch(Dispatchers.IO) {
+                svc.messenger.markConversationRead(nodeId)
+                callJs("onDLTNUnreadCount", svc.messenger.getUnreadCount())
+            }
+        }
+
+        @JavascriptInterface
+        fun getDLTNUnreadCount() {
+            val svc = getDLTNService() ?: return
+            lifecycleScope.launch(Dispatchers.IO) {
+                callJs("onDLTNUnreadCount", svc.messenger.getUnreadCount())
+            }
+        }
+
         @JavascriptInterface
         fun getDLTNContacts() {
             val svc = getDLTNService() ?: return
@@ -1105,19 +1258,34 @@ class MainActivity : FragmentActivity() {
         fun getDLTNConversation(nodeId: String) {
             val svc = getDLTNService() ?: return
             lifecycleScope.launch(Dispatchers.IO) {
+                val CALL_SIG_TYPES = setOf("call_invite","call_accept","call_reject","call_end")
                 val msgs = svc.messenger.getConversation(nodeId)
                 val arr  = JSONArray()
                 for (m in msgs) {
+                    // Call-signalling messages are transport control — never show in conversation UI.
+                    if (m.type in CALL_SIG_TYPES) continue
+                    // Image messages store "dltn_img:<id>" as content to avoid
+                    // SQLiteBlobTooBigException. Resolve to base64 here so JS
+                    // sees the same format it always expected.
+                    val resolvedContent = if (m.content.startsWith("dltn_img:")) {
+                        val msgId  = m.content.removePrefix("dltn_img:")
+                        val imgFile = File(filesDir, "dltn_images/$msgId.jpg")
+                        if (imgFile.exists()) {
+                            android.util.Base64.encodeToString(imgFile.readBytes(), android.util.Base64.NO_WRAP)
+                        } else m.content
+                    } else m.content
                     arr.put(JSONObject().apply {
                         put("id",          m.id)
                         put("fromNodeId",  m.fromNodeId)
                         put("toNodeId",    m.toNodeId)
                         put("type",        m.type)
-                        put("content",     m.content)
+                        put("content",     resolvedContent)
                         put("timestampMs", m.timestampMs)
                         put("direction",   m.direction)
                         put("delivered",   m.delivered)
                         put("read",        m.read)
+                        put("imageHash",   m.imageHash ?: "")
+                        put("replyToId",   m.replyToId ?: "")
                     })
                 }
                 withContext(Dispatchers.Main) { callJs("onDLTNConversationLoaded", arr.toString()) }
@@ -1155,9 +1323,11 @@ class MainActivity : FragmentActivity() {
                 return
             }
             sendToLog("[CALL] Opening sovereign DLTN call to ${nodeId.take(10)}… (Wi-Fi Aware / BLE, no cellular)")
-            lifecycleScope.launch(Dispatchers.IO) {
-                svc.messenger.sendCallInvite(nodeId)
-            }
+            // BUG 3 FIX: do NOT send the invite here. startOutgoingCall() emits the
+            // call_invite itself via sendSignal, and only when callState == IDLE.
+            // The previous explicit messenger.sendCallInvite() was ungated, so every
+            // repeated tap queued another invite bubble (call-signal flood). Routing
+            // solely through startOutgoingCall() makes the IDLE guard authoritative.
             svc.callEngine.startOutgoingCall(nodeId)
         }
 
@@ -1307,46 +1477,117 @@ class MainActivity : FragmentActivity() {
                     } catch (e: Exception) { "" }
                     payload.put("signature", signature)
 
-                    withContext(Dispatchers.Main) { sendToLog("[LNES-11] Requesting Sim(3) alignment from Desktop Swarm…") }
-
+                    val finalBytes = payload.toString().toByteArray()
                     val host = configManager.aggregatorIp.ifEmpty { "explorer-api.exergynet.org" }
-                    val conn = (URL("https://$host/api/v1/position/sync").openConnection() as HttpURLConnection).apply {
-                        requestMethod = "POST"
-                        setRequestProperty("Content-Type", "application/json")
-                        connectTimeout = 12000
-                        readTimeout = 20000
-                        doOutput = true
-                    }
-                    conn.outputStream.use { it.write(payload.toString().toByteArray()) }
-                    val code = conn.responseCode
-                    if (code !in 200..299) {
-                        withContext(Dispatchers.Main) { callJs("onPositionSyncFailed", "router HTTP $code") }
-                        return@launch
-                    }
-                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
-                    val obj = JSONObject(resp)
-                    // Accept {latitude,longitude} | {lat,lon} | {position:[lat,lon]}
-                    val lat = obj.optDouble("latitude", obj.optDouble("lat", Double.NaN))
-                    val lon = obj.optDouble("longitude", obj.optDouble("lon", Double.NaN))
-                    val (rLat, rLon) = if (lat.isNaN() || lon.isNaN()) {
-                        val pos = obj.optJSONArray("position")
-                        if (pos != null && pos.length() >= 2) pos.optDouble(0) to pos.optDouble(1)
-                        else Double.NaN to Double.NaN
-                    } else lat to lon
 
-                    if (rLat.isNaN() || rLon.isNaN()) {
-                        withContext(Dispatchers.Main) { callJs("onPositionSyncFailed", "no coordinates in response") }
-                        return@launch
-                    }
-                    withContext(Dispatchers.Main) {
-                        sendToLog("[LNES-11] ✓ Swarm fix: $rLat, $rLon (ZK-verified, no GPS)")
-                        callJs("_streetsUpdateUserPos", rLat, rLon)
-                        callJs("onPositionSynced", rLat, rLon)
+                    // ── PRIMARY STRIKE: cloud (Apex L0 router over HTTPS) ──────────
+                    try {
+                        withContext(Dispatchers.Main) { sendToLog("[LNES-11] Requesting Sim(3) alignment (cloud)…") }
+                        val conn = (URL("https://$host/api/v1/position/sync").openConnection() as HttpURLConnection).apply {
+                            requestMethod = "POST"
+                            setRequestProperty("Content-Type", "application/json")
+                            connectTimeout = 12000
+                            readTimeout = 20000
+                            doOutput = true
+                        }
+                        conn.outputStream.use { it.write(finalBytes) }
+                        val code = conn.responseCode
+                        if (code !in 200..299) throw java.io.IOException("router HTTP $code")
+                        val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                        val obj = JSONObject(resp)
+
+                        val status = obj.optString("status")
+                        if (status == "pending_swarm") {
+                            val jobId = obj.optString("job_id_hex")
+                            if (jobId.isEmpty()) { withContext(Dispatchers.Main) { callJs("onPositionSyncFailed", "no job_id_hex") }; return@launch }
+                            withContext(Dispatchers.Main) { sendToLog("[LNES-11] Queued to swarm: $jobId — awaiting ZK proof…") }
+                            pollSwarmPosition(host, jobId)
+                            return@launch
+                        }
+                        val (rLat, rLon) = parseCoords(obj, "")
+                        if (!rLat.isNaN() && !rLon.isNaN()) {
+                            withContext(Dispatchers.Main) {
+                                sendToLog("[LNES-11] ✓ Fix: $rLat, $rLon (cloud, no GPS)")
+                                callJs("_streetsUpdateUserPos", rLat, rLon); callJs("onPositionSynced", rLat, rLon)
+                            }
+                            return@launch
+                        }
+                        // Cloud reachable but gave no usable answer — fall through to local mesh.
+                        throw java.io.IOException("no coordinates in cloud response")
+                    } catch (cloud: java.io.IOException) {
+                        // ── SECONDARY STRIKE: local DLTN TCP:8003 (true off-grid) ──
+                        // Triggered by UnknownHostException / SocketTimeoutException /
+                        // ConnectException (all IOException) when Wi-Fi/cellular is dark.
+                        withContext(Dispatchers.Main) {
+                            sendToLog("[LNES-11] Cloud unreachable (${cloud.message}) — routing over local DLTN TCP:8003…")
+                        }
+                        val targetIp = host.substringBefore(":")
+                        val secret = configManager.tcpSecret.toByteArray(Charsets.UTF_8)
+                        val reply = EdgeTransmitter.requestTcp(targetIp, 8003, finalBytes, secret)
+                        if (reply.isNullOrEmpty()) {
+                            withContext(Dispatchers.Main) { callJs("onPositionSyncFailed", "local mesh: no reply on :8003") }
+                            return@launch
+                        }
+                        // Desktop replies with coords as JSON or "geo:lat,lon".
+                        val rObj = try { JSONObject(reply) } catch (_: Exception) { JSONObject() }
+                        val (la, lo) = parseCoords(rObj, reply)
+                        if (la.isNaN() || lo.isNaN()) {
+                            withContext(Dispatchers.Main) { callJs("onPositionSyncFailed", "local mesh: unparseable reply") }
+                            return@launch
+                        }
+                        withContext(Dispatchers.Main) {
+                            sendToLog("[LNES-11] ✓ Fix: $la, $lo (local DLTN mesh, fully off-grid)")
+                            callJs("_streetsUpdateUserPos", la, lo); callJs("onPositionSynced", la, lo)
+                        }
                     }
                 } catch (e: Exception) {
                     withContext(Dispatchers.Main) { callJs("onPositionSyncFailed", e.message ?: "network") }
                 }
             }
+        }
+
+        // Poll the L0 ledger for the swarm's ZK-verified fix on this job (every 3s, ~60s cap).
+        private suspend fun pollSwarmPosition(host: String, jobId: String) {
+            val maxAttempts = 20
+            for (attempt in 1..maxAttempts) {
+                kotlinx.coroutines.delay(3000)
+                try {
+                    val c = (URL("https://$host/api/l0/transactions").openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 10000; readTimeout = 12000
+                    }
+                    if (c.responseCode !in 200..299) continue
+                    val arr = JSONArray(c.inputStream.bufferedReader().use { it.readText() })
+                    for (i in 0 until arr.length()) {
+                        val tx = arr.optJSONObject(i) ?: continue
+                        if (tx.optString("job_id_hex") != jobId) continue
+                        if (!tx.optString("status").contains("VERIFIED")) continue
+                        // resolved coords ride in payload_url (geo:LAT,LON) or a resolved_coords field
+                        val (la, lo) = parseCoords(tx, tx.optString("payload_url"))
+                        if (!la.isNaN() && !lo.isNaN()) {
+                            withContext(Dispatchers.Main) {
+                                sendToLog("[LNES-11] ✓ Swarm fix: $la, $lo (ZK-STARK VERIFIED, no GPS)")
+                                callJs("_streetsUpdateUserPos", la, lo)
+                                callJs("onPositionSynced", la, lo)
+                            }
+                            return
+                        }
+                    }
+                } catch (_: Exception) { /* keep polling */ }
+            }
+            withContext(Dispatchers.Main) { callJs("onPositionSyncFailed", "swarm timeout") }
+        }
+
+        // Extract [lat,lon] from a JSON object and/or a payload_url string.
+        private fun parseCoords(obj: JSONObject, payloadUrl: String): Pair<Double, Double> {
+            obj.optJSONArray("resolved_coords")?.let { if (it.length() >= 2) return it.optDouble(0) to it.optDouble(1) }
+            val lat = obj.optDouble("latitude", obj.optDouble("lat", Double.NaN))
+            val lon = obj.optDouble("longitude", obj.optDouble("lon", Double.NaN))
+            if (!lat.isNaN() && !lon.isNaN()) return lat to lon
+            obj.optJSONArray("position")?.let { if (it.length() >= 2) return it.optDouble(0) to it.optDouble(1) }
+            // payload_url like "geo:39.77,-86.29" or "...#geo=39.77,-86.29"
+            val m = Regex("geo[:=]\\s*(-?\\d+\\.?\\d*)\\s*,\\s*(-?\\d+\\.?\\d*)").find(payloadUrl)
+            if (m != null) return (m.groupValues[1].toDoubleOrNull() ?: Double.NaN) to (m.groupValues[2].toDoubleOrNull() ?: Double.NaN)
+            return Double.NaN to Double.NaN
         }
 
         // Offline QR encode: node-id → PNG data URL (ZXing). JS sets it as <img src>.
@@ -1399,6 +1640,15 @@ class MainActivity : FragmentActivity() {
                 } catch (e: Exception) {
                     callJs("onNodeQrScanError", e.message ?: "scanner unavailable")
                 }
+            }
+        }
+
+        // Drop-Intel attachment picker. Result → JS onAttachmentPicked(json).
+        @JavascriptInterface
+        fun pickAttachment() {
+            runOnUiThread {
+                try { pickAttachmentLauncher.launch("*/*") }
+                catch (e: Exception) { sendToLog(">>> [ATTACH] picker unavailable: ${e.message}") }
             }
         }
 
@@ -1487,6 +1737,7 @@ class MainActivity : FragmentActivity() {
             ttlSecs: Int,
             groups: String,
             category: String,
+            attachmentJson: String,
         ) {
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
@@ -1514,6 +1765,16 @@ class MainActivity : FragmentActivity() {
                         put("miner_id",  configManager.getMinerId())
                         put("category",  category.ifBlank { "INTEL" })
                         if (groups.isNotBlank()) put("groups", groups)
+                        // Optional attachment (image inline base64; doc/video metadata only).
+                        try {
+                            val att = JSONObject(attachmentJson.ifBlank { "{}" })
+                            val b64 = att.optString("dataB64")
+                            if (b64.isNotEmpty()) {
+                                put("attachment_b64",  b64)
+                                put("attachment_mime", att.optString("mime", "image/jpeg"))
+                                put("attachment_name", att.optString("name", "attachment"))
+                            }
+                        } catch (_: Exception) {}
                     }
                     val conn = URL("https://$ip/api/v1/drops/create").openConnection() as HttpURLConnection
                     conn.requestMethod = "POST"
@@ -1553,7 +1814,9 @@ class MainActivity : FragmentActivity() {
                         try { "[Proximity required: ${JSONObject(body).optString("error","move closer")}]" }
                         catch (_: Exception) { "[Move within drop radius to read]" }
                     }
-                    withContext(Dispatchers.Main) { callJs("onDropContentsReceived", dropId, contents) }
+                    val attB64  = if (code == 200) try { JSONObject(body).optString("attachment_b64", "") } catch (_: Exception) { "" } else ""
+                    val attMime = if (code == 200) try { JSONObject(body).optString("attachment_mime", "") } catch (_: Exception) { "" } else ""
+                    withContext(Dispatchers.Main) { callJs("onDropContentsReceived", dropId, contents, attB64, attMime) }
                 } catch (e: Exception) {
                     sendToLog("[DROP] Interrogate failed: ${e.message}")
                 }
@@ -1670,6 +1933,58 @@ class MainActivity : FragmentActivity() {
             }
             return data
         }
+    }
+
+    // Reads a picked attachment. Images → downscaled JPEG base64 (inline-safe).
+    // Other media (video/document) → metadata only (no inline bytes; flagged).
+    private fun processAttachment(uri: Uri) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+                val name = queryDisplayName(uri)
+                val raw = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: ByteArray(0)
+                val obj = JSONObject().apply {
+                    put("name", name); put("mime", mime); put("size", raw.size)
+                }
+                if (mime.startsWith("image/") && raw.isNotEmpty()) {
+                    val bmp = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size)
+                    if (bmp != null) {
+                        val maxDim = 1280
+                        val scale = minOf(1f, maxDim.toFloat() / maxOf(bmp.width, bmp.height))
+                        val scaled = if (scale < 1f)
+                            android.graphics.Bitmap.createScaledBitmap(bmp, (bmp.width*scale).toInt(), (bmp.height*scale).toInt(), true)
+                        else bmp
+                        var quality = 75
+                        var bytes: ByteArray
+                        do {
+                            val baos = java.io.ByteArrayOutputStream()
+                            scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, baos)
+                            bytes = baos.toByteArray()
+                            quality -= 15
+                        } while (bytes.size > 300_000 && quality >= 30)
+                        obj.put("mime", "image/jpeg")
+                        obj.put("dataB64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                        obj.put("size", bytes.size)
+                    }
+                } else {
+                    // video / document: too large to inline as JSON. Carry metadata only.
+                    obj.put("dataB64", "")
+                    obj.put("note", "media_pending_mesh_transport")
+                }
+                withContext(Dispatchers.Main) { callJs("onAttachmentPicked", obj.toString()) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { callJs("onAttachmentPicked", JSONObject().put("error", e.message ?: "read failed").toString()) }
+            }
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        return try {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0 && c.moveToFirst()) c.getString(idx) ?: "attachment" else "attachment"
+            } ?: "attachment"
+        } catch (_: Exception) { "attachment" }
     }
 
     private fun fetchBaseUsdcBalance(address: String): Double {
