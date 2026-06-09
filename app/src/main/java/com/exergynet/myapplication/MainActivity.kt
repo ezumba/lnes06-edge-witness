@@ -1258,6 +1258,43 @@ class MainActivity : FragmentActivity() {
         }
 
         @JavascriptInterface
+        fun getMeshDiagnostics() {
+            val svc = getDLTNService()
+            val json = svc?.meshDiagnostics() ?: "{\"running\":false,\"error\":\"service not running\"}"
+            // Also report whether the app holds the BLE runtime permissions, since
+            // that is the most common reason the mesh is dark.
+            val scan = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_SCAN) == android.content.pm.PackageManager.PERMISSION_GRANTED else true
+            val conn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED else true
+            val adv = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.BLUETOOTH_ADVERTISE) == android.content.pm.PackageManager.PERMISSION_GRANTED else true
+            val merged = try {
+                JSONObject(json).apply {
+                    put("permScan", scan); put("permConnect", conn); put("permAdvertise", adv)
+                }.toString()
+            } catch (_: Exception) { json }
+            callJs("onMeshDiagnostics", merged)
+        }
+
+        // Re-request BLE permissions on demand (from the diagnostics panel).
+        @JavascriptInterface
+        fun requestMeshPermissions() {
+            runOnUiThread {
+                val list = mutableListOf<String>()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    list.add(Manifest.permission.BLUETOOTH_SCAN)
+                    list.add(Manifest.permission.BLUETOOTH_CONNECT)
+                    list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                }
+                if (list.isNotEmpty()) requestPermissions.launch(list.toTypedArray())
+            }
+        }
+
+        @JavascriptInterface
         fun getDLTNContacts() {
             val svc = getDLTNService() ?: return
             lifecycleScope.launch(Dispatchers.IO) {

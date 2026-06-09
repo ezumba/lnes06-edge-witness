@@ -71,6 +71,12 @@ object DLTNConstants {
     // negotiated secret (e.g. ECDH keyed off the signed call_invite) before
     // production: a static PSK gives link encryption but no per-session secrecy.
     const val WIFI_AWARE_VOICE_PSK    = "exergynet-dltn-voice-psk-v1"
+    // LNES-12 GLOBAL rail marker. Local invites carry the caller's "ip:port" in
+    // the signal payload; global (WebSocket-relayed) invites carry this sentinel
+    // so both peers bind the WebSocket audio bridge instead of a LAN socket.
+    const val CALL_RAIL_GLOBAL        = "GLOBAL"
+    // LNES-12 Sovereign WebSocket Relay endpoint (additive fallback to local mesh).
+    const val GLOBAL_MESH_WS_BASE     = "wss://explorer-api.exergynet.org/api/v1/mesh/global/"
     const val MSG_TYPE_CALL_INVITE    = "call_invite"
     const val MSG_TYPE_CALL_ACCEPT    = "call_accept"
     const val MSG_TYPE_CALL_REJECT    = "call_reject"

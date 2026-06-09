@@ -25,8 +25,8 @@ android {
         applicationId = "com.exergynet.myapplication"
         minSdk = 29
         targetSdk = 36
-        versionCode = 22
-        versionName = "1.5.7"
+        versionCode = 24
+        versionName = "1.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -94,4 +94,8 @@ dependencies {
     implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     // ZXing core — offline QR ENCODING (node-id → PNG); works with no network
     implementation("com.google.zxing:core:3.5.3")
+
+    // LNES-12 Sovereign WebSocket Relay (GLOBAL call fallback). OkHttp WebSocket —
+    // no WebRTC, no Firebase. okio ships transitively with okhttp 4.x.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

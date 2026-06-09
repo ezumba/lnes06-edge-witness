@@ -25,6 +25,8 @@ class DLTNForegroundService : Service() {
     internal lateinit var callEngine:  DLTNCallEngine
     internal lateinit var arem:        AREMSynchronizer
     internal lateinit var assa:        ASSAScavenger
+    // LNES-12 GLOBAL rail (additive fallback). Null-safe: local mesh never depends on it.
+    internal var globalMesh: GlobalMeshService? = null
 
     private val pendingRelayJobs = mutableListOf<DLTNRelayJob>()
     private val flushIntervalMs  = 5 * 60 * 1000L
@@ -33,15 +35,24 @@ class DLTNForegroundService : Service() {
         super.onCreate()
         instance = this
         createNotificationChannel()
-        // Boot promotion is relay-only and never uses the mic. Type it explicitly
-        // as CONNECTED_DEVICE: on Android 14+ the 2-arg startForeground() would
-        // otherwise claim the UNION of manifest types (now incl. microphone) and
-        // crash at boot whenever RECORD_AUDIO isn't yet granted.
+        // ANDROID 14 STARTUP HAZARD: a connectedDevice/microphone FGS requires its
+        // prerequisite permission (a Bluetooth perm / RECORD_AUDIO) to ALREADY be
+        // granted, or startForeground throws and the OS kills the service. On a
+        // fresh launch BLE perms aren't granted yet → the service died at boot,
+        // `instance` was null, and the mesh never came up. So we boot with the
+        // dataSync type, which only needs the auto-granted FOREGROUND_SERVICE_DATA_SYNC
+        // normal permission and therefore always succeeds. Once a BT permission is
+        // present we promote the banner to connectedDevice (see promoteToConnectedDevice).
+        val bootType = if (hasBluetoothPermission()) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        }
         ServiceCompat.startForeground(
             this,
             DLTNConstants.DLTN_FOREGROUND_NOTIFICATION_ID,
             buildNotification("Mesh relay active — scanning for peers"),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            bootType,
         )
 
         val minerId = ConfigManager(this).getMinerId()
@@ -55,10 +66,22 @@ class DLTNForegroundService : Service() {
             onCallSignalReceived = { type, from, content -> handleCallSignal(type, from, content) },
         )
 
+        // LNES-12: GLOBAL rail. Persistent WebSocket to the L0 Switchboard, keyed by
+        // this node's id. Inbound signaling envelopes are routed straight into the
+        // SAME messenger.receiveRawPayload pipeline as local mesh traffic, so the UI
+        // rings identically. Audio is bridged into the existing DLTNAudioEngine.
+        globalMesh = GlobalMeshService(
+            myNodeId = messenger.localNodeId(),
+            onSignalEnvelope = { bytes ->
+                scope.launch { messenger.receiveRawPayload(DLTNConstants.CALL_RAIL_GLOBAL, bytes) }
+            },
+        )
+
         callEngine = DLTNCallEngine(
             context            = this,
             onCallStateChanged = { state, peer, dropped, reason -> notifyCallStateToUI(state, peer, dropped, reason) },
             sendSignal = { to, type, payload ->
+                // RAIL 1 — local BLE/WiFi-Aware outbox (primary, untouched).
                 scope.launch {
                     when (type) {
                         DLTNConstants.MSG_TYPE_CALL_INVITE -> messenger.sendCallInvite(to, payload)
@@ -68,6 +91,16 @@ class DLTNForegroundService : Service() {
                     }
                 }
             },
+            // RAIL 2 — global WebSocket relay (additive fallback).
+            globalSignal = { to, type, payload ->
+                scope.launch {
+                    val env = messenger.buildSignalEnvelope(to, type, payload)
+                    globalMesh?.sendSignalEnvelope(to, env)
+                }
+            },
+            globalAvailable   = { globalMesh?.isConnected() == true },
+            globalAudioBridge = { peer -> globalMesh?.openAudioBridge(peer) },
+            globalAudioClose  = { globalMesh?.closeAudioBridge() },
         )
 
         dltnManager = DLTNManager(
@@ -92,10 +125,16 @@ class DLTNForegroundService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "[DLTN] Start failed — service alive, relay inactive: ${e.message}")
         }
+
+        // LNES-12: open the GLOBAL rail. Independent of BLE permissions — it only
+        // needs network, so global calling works even when the local mesh is dark.
+        try { globalMesh?.connect() }
+        catch (e: Exception) { Log.w(TAG, "[DLTN] Global rail connect failed: ${e.message}") }
     }
 
     override fun onDestroy() {
         instance = null
+        try { globalMesh?.disconnect() } catch (_: Exception) {}
         try { callEngine.destroy()  } catch (_: Exception) {}
         try { messenger.destroy()   } catch (_: Exception) {}
         try { arem.destroy()        } catch (_: Exception) {}
@@ -115,8 +154,36 @@ class DLTNForegroundService : Service() {
      * the moment permissions land — no app restart required.
      */
     fun ensureMeshStarted() {
+        promoteToConnectedDevice()
         try { dltnManager.start() }
         catch (e: Exception) { Log.w(TAG, "[DLTN] ensureMeshStarted failed: ${e.message}") }
+    }
+
+    /** Live BLE mesh diagnostics JSON for the in-app panel. */
+    fun meshDiagnostics(): String =
+        try { dltnManager.diagnostics() } catch (e: Exception) { "{\"error\":\"${e.message}\"}" }
+
+    private fun hasBluetoothPermission(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) return true
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
+            PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    /** Re-assert the relay banner as connectedDevice now that a BT perm is granted. */
+    private fun promoteToConnectedDevice() {
+        if (!hasBluetoothPermission()) return
+        try {
+            ServiceCompat.startForeground(
+                this,
+                DLTNConstants.DLTN_FOREGROUND_NOTIFICATION_ID,
+                buildNotification("Mesh relay active — scanning for peers"),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "[DLTN] connectedDevice promotion failed: ${e.message}")
+        }
     }
 
     // ── Call signal routing ───────────────────────────────────────────────────
@@ -125,15 +192,21 @@ class DLTNForegroundService : Service() {
         Log.i(TAG, "[CALL] Signal $type from ${fromNodeId.take(8)}")
         when (type) {
             DLTNConstants.MSG_TYPE_CALL_INVITE -> {
-                // content = caller's "ip:port" for direct TCP voice connection
+                // content = caller's "ip:port" (LOCAL rail) or "GLOBAL" (LNES-12 rail).
+                // setRinging dedups a second invite that arrives on the other rail.
                 callEngine.setRinging(fromNodeId, callerAddress = content)
                 showIncomingCallNotification(fromNodeId)
                 notifyCallStateToUI(DLTNCallEngine.CallState.RINGING, fromNodeId)
             }
             DLTNConstants.MSG_TYPE_CALL_ACCEPT -> {
-                // Callee accepted — our ServerSocket.accept() will unblock when they connect;
-                // no additional action needed here.
-                Log.i(TAG, "[CALL] Peer accepted — awaiting TCP connection")
+                if (content == DLTNConstants.CALL_RAIL_GLOBAL) {
+                    // GLOBAL rail accept — bind the WebSocket audio bridge on the caller.
+                    callEngine.onGlobalAccept(fromNodeId)
+                } else {
+                    // LOCAL rail — our ServerSocket.accept() unblocks when the callee
+                    // connects; nothing else to do here.
+                    Log.i(TAG, "[CALL] Peer accepted (local) — awaiting TCP connection")
+                }
             }
             DLTNConstants.MSG_TYPE_CALL_REJECT -> callEngine.endCall()
             DLTNConstants.MSG_TYPE_CALL_END    -> callEngine.endCall()

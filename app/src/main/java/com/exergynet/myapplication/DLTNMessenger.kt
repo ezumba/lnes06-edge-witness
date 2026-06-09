@@ -218,6 +218,22 @@ class DLTNMessenger(
     suspend fun hasPendingOutbox(): Boolean =
         db.dltnMessageDao().getPendingOutbox().isNotEmpty()
 
+    /**
+     * LNES-12: build a SIGNED call-signal envelope WITHOUT inserting it into the
+     * outbox. Used by the GLOBAL WebSocket rail, which transmits over OkHttp rather
+     * than the local BLE outbox. Identical envelope/D2 format as the local path, so
+     * the remote receiver verifies + rings exactly the same way.
+     */
+    fun buildSignalEnvelope(toNodeId: String, type: String, payload: String = ""): ByteArray {
+        val body = payload.ifEmpty { type }
+        val msg = composeMessage(
+            toNodeId = toNodeId,
+            type     = type,
+            content  = Base64.encodeToString(body.toByteArray(Charsets.UTF_8), Base64.NO_WRAP),
+        )
+        return buildEnvelopeBytes(msg)
+    }
+
     suspend fun markDelivered(messageId: String) {
         db.dltnMessageDao().markDelivered(messageId)
     }
