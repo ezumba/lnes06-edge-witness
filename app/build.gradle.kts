@@ -25,8 +25,8 @@ android {
         applicationId = "com.exergynet.myapplication"
         minSdk = 29
         targetSdk = 36
-        versionCode = 21
-        versionName = "1.5.6"
+        versionCode = 22
+        versionName = "1.5.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

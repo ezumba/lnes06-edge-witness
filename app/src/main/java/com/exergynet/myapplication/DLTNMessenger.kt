@@ -198,6 +198,26 @@ class DLTNMessenger(
         return db.dltnMessageDao().getPendingOutboxForNode(nodeId).map { buildEnvelopeBytes(it) }
     }
 
+    /**
+     * Outbox envelopes for [nodeId] paired with their message IDs, so the BLE
+     * transport can mark each one delivered after a confirmed GATT write.
+     */
+    suspend fun getPendingOutboxEnvelopes(nodeId: String): List<Pair<String, ByteArray>> {
+        return db.dltnMessageDao().getPendingOutboxForNode(nodeId)
+            .map { it.id to buildEnvelopeBytes(it) }
+    }
+
+    /** All pending outbox envelopes regardless of target — used for mesh gossip. */
+    suspend fun getAllPendingOutboxEnvelopes(): List<Pair<String, ByteArray>> {
+        return db.dltnMessageDao().getPendingOutbox()
+            .map { it.id to buildEnvelopeBytes(it) }
+    }
+
+    fun localNodeId(): String = getLocalNodeId()
+
+    suspend fun hasPendingOutbox(): Boolean =
+        db.dltnMessageDao().getPendingOutbox().isNotEmpty()
+
     suspend fun markDelivered(messageId: String) {
         db.dltnMessageDao().markDelivered(messageId)
     }

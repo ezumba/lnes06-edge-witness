@@ -108,6 +108,17 @@ class DLTNForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Called by MainActivity once the user grants BLUETOOTH_SCAN/CONNECT at
+     * runtime. The initial start() in onCreate may have deferred (no perms yet);
+     * DLTNManager.start() is idempotent and retry-safe, so this ignites the mesh
+     * the moment permissions land — no app restart required.
+     */
+    fun ensureMeshStarted() {
+        try { dltnManager.start() }
+        catch (e: Exception) { Log.w(TAG, "[DLTN] ensureMeshStarted failed: ${e.message}") }
+    }
+
     // ── Call signal routing ───────────────────────────────────────────────────
 
     private fun handleCallSignal(type: String, fromNodeId: String, content: String = "") {
