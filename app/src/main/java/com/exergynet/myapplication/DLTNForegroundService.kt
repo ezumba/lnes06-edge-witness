@@ -126,6 +126,8 @@ class DLTNForegroundService : Service() {
 
         // Route inbound global WebRTC signaling frames into the active call.
         globalMesh?.onRtcSignal = { fromId, rtcJson -> callEngine.onGlobalRtcSignal(fromId, rtcJson) }
+        // Route inbound binary media frames to the per-sender MediaCodec demultiplexer.
+        globalMesh?.onBinaryFrame = { senderId, payload -> callEngine.onIncomingBinaryFrame(senderId, payload) }
 
         dltnManager = DLTNManager(
             context   = this,

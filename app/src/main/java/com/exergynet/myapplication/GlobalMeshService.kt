@@ -198,13 +198,16 @@ class GlobalMeshService(
      *   Bytes [64..]    : payload
      */
     fun buildBinaryFrame(targetOrRoomId: String, payload: ByteArray): ByteArray {
-        val buf = ByteBuffer.allocate(64 + payload.size)
-        val sender = myNodeId.take(44).padEnd(44)
-        val target = targetOrRoomId.take(20).padEnd(20)
-        buf.put(sender.toByteArray(Charsets.UTF_8))
-        buf.put(target.toByteArray(Charsets.UTF_8))
-        buf.put(payload)
-        return buf.array()
+        // Fixed 64-byte header: [0..43] SENDER_ID, [44..63] TARGET_ID, [64..] payload.
+        // System.arraycopy into a zero-filled ByteArray guarantees byte-offset invariance
+        // regardless of UTF-8 multi-byte characters in any node ID — no padEnd/String tricks.
+        val frame = ByteArray(64 + payload.size) // zero-initialized — null bytes pad remaining space
+        val senderBytes = myNodeId.toByteArray(Charsets.UTF_8)
+        val targetBytes = targetOrRoomId.toByteArray(Charsets.UTF_8)
+        System.arraycopy(senderBytes, 0, frame, 0,  minOf(senderBytes.size, 44))
+        System.arraycopy(targetBytes, 0, frame, 44, minOf(targetBytes.size, 20))
+        System.arraycopy(payload,     0, frame, 64, payload.size)
+        return frame
     }
 
     /**
