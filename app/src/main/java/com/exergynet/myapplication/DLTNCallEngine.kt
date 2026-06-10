@@ -223,7 +223,10 @@ class DLTNCallEngine(
         remoteRendererForNew: SurfaceViewRenderer?,
     ) {
         if (_callState.value != CallState.CONNECTED) return
-        val roomId = "GRP_" + UUID.randomUUID().toString().take(8).uppercase()
+        // Room ID: GRP_ + first 4 chars of myNodeId + last 4 digits of timestamp
+        // Short, human-recognisable, collision-safe within a session.
+        val ts = System.currentTimeMillis().toString()
+        val roomId = "GRP_${myNodeId.take(4).uppercase()}${ts.takeLast(4)}"
         activeRoomId = roomId
         Log.i(TAG, "[GROUP] Upgrading to group call room=$roomId new=$newPeerId")
 
