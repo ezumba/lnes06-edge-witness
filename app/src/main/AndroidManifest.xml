@@ -9,6 +9,11 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- LNES WiFi LAN rail: NSD/mDNS service discovery + multicast lock so two
+         phones on the same Wi-Fi find each other and exchange messages/calls over
+         direct TCP. Needs no dangerous runtime permission (unlike BLE). -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- BLUE TEAM (H4): READ_CONTACTS + CALL_PHONE removed alongside the pruned
          getPhoneContacts / makePhoneCall bridge methods. ExergyNet is a compute and

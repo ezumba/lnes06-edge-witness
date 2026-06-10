@@ -77,6 +77,12 @@ object DLTNConstants {
     const val CALL_RAIL_GLOBAL        = "GLOBAL"
     // LNES-12 Sovereign WebSocket Relay endpoint (additive fallback to local mesh).
     const val GLOBAL_MESH_WS_BASE     = "wss://explorer-api.exergynet.org/api/v1/mesh/global/"
+    // LNES-12 Sovereign TURN relay (AWS Alpha Router). Bounces encrypted WebRTC
+    // media between NATed peers across the internet — no Web2 STUN/TURN. Only
+    // injected for GLOBAL-rail calls; local mesh calls use an empty ICE list.
+    const val TURN_URI                = "turn:18.209.174.113:3478"
+    const val TURN_USERNAME           = "exergynet"
+    const val TURN_PASSWORD           = "omega_relay_2026"
     const val MSG_TYPE_CALL_INVITE    = "call_invite"
     const val MSG_TYPE_CALL_ACCEPT    = "call_accept"
     const val MSG_TYPE_CALL_REJECT    = "call_reject"

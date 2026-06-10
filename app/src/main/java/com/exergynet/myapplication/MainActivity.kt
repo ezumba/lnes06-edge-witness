@@ -243,7 +243,10 @@ class MainActivity : FragmentActivity() {
         // bridge methods that used them (makePhoneCall, getPhoneContacts) were pruned.
         val permissionList = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.CAMERA
+            Manifest.permission.CAMERA,
+            // WebRTC voice capture needs RECORD_AUDIO granted at runtime, or the
+            // audio track is silent. CAMERA (above) covers the video capturer.
+            Manifest.permission.RECORD_AUDIO
         )
         // DLTN: BLUETOOTH_SCAN / CONNECT / ADVERTISE are runtime (dangerous)
         // permissions on API 31+ (Android 12+). Without SCAN the mesh can't

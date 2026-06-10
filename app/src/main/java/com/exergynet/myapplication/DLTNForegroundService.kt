@@ -27,6 +27,8 @@ class DLTNForegroundService : Service() {
     internal lateinit var assa:        ASSAScavenger
     // LNES-12 GLOBAL rail (additive fallback). Null-safe: local mesh never depends on it.
     internal var globalMesh: GlobalMeshService? = null
+    // WiFi LAN rail (NSD/mDNS + TCP) — reliable primary when peers share Wi-Fi.
+    internal var lanService: DLTNLanService? = null
 
     private val pendingRelayJobs = mutableListOf<DLTNRelayJob>()
     private val flushIntervalMs  = 5 * 60 * 1000L
@@ -79,6 +81,16 @@ class DLTNForegroundService : Service() {
         // LNES-12 Message Hub: let the messenger race text over the global rail too.
         messenger.globalSend = { to, env -> globalMesh?.sendSignalEnvelope(to, env) }
 
+        // WiFi LAN rail. Discovers same-Wi-Fi peers via NSD and delivers the SAME
+        // outbox (messages + call signals) over direct TCP. No BLE permission needed.
+        lanService = DLTNLanService(
+            context     = this,
+            myNodeId    = messenger.localNodeId(),
+            onEnvelope  = { peer, bytes -> scope.launch { messenger.receiveRawPayload(peer, bytes) } },
+            pendingFor  = { nid -> messenger.getPendingOutboxEnvelopes(nid) },
+            onDelivered = { id -> messenger.markDelivered(id) },
+        )
+
         callEngine = DLTNCallEngine(
             context            = this,
             onCallStateChanged = { state, peer, dropped, reason -> notifyCallStateToUI(state, peer, dropped, reason) },
@@ -93,17 +105,20 @@ class DLTNForegroundService : Service() {
                     }
                 }
             },
-            // RAIL 2 — global WebSocket relay (additive fallback).
+            // RAIL 2 — global WebSocket relay invite delivery (rings far peers).
             globalSignal = { to, type, payload ->
                 scope.launch {
                     val env = messenger.buildSignalEnvelope(to, type, payload)
                     globalMesh?.sendSignalEnvelope(to, env)
                 }
             },
-            globalAvailable   = { globalMesh?.isConnected() == true },
-            globalAudioBridge = { peer -> globalMesh?.openAudioBridge(peer) },
-            globalAudioClose  = { globalMesh?.closeAudioBridge() },
+            globalAvailable = { globalMesh?.isConnected() == true },
+            // GLOBAL WebRTC signaling: push SDP/ICE frames to the peer over the WS.
+            globalRtcSend = { peerId, rtcJson -> globalMesh?.sendRtcSignal(peerId, rtcJson) },
         )
+
+        // Route inbound global WebRTC signaling frames into the active call.
+        globalMesh?.onRtcSignal = { fromId, rtcJson -> callEngine.onGlobalRtcSignal(fromId, rtcJson) }
 
         dltnManager = DLTNManager(
             context   = this,
@@ -132,10 +147,16 @@ class DLTNForegroundService : Service() {
         // needs network, so global calling works even when the local mesh is dark.
         try { globalMesh?.connect() }
         catch (e: Exception) { Log.w(TAG, "[DLTN] Global rail connect failed: ${e.message}") }
+
+        // WiFi LAN rail. Independent of BLE permissions — works the moment two
+        // phones share a Wi-Fi network. This is the reliable primary path.
+        try { lanService?.start() }
+        catch (e: Exception) { Log.w(TAG, "[DLTN] LAN rail start failed: ${e.message}") }
     }
 
     override fun onDestroy() {
         instance = null
+        try { lanService?.stop() } catch (_: Exception) {}
         try { globalMesh?.disconnect() } catch (_: Exception) {}
         try { callEngine.destroy()  } catch (_: Exception) {}
         try { messenger.destroy()   } catch (_: Exception) {}
