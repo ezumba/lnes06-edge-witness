@@ -33,19 +33,10 @@ class DLTNMessenger(
 
     // ── Local node identity ──────────────────────────────────────────────────
 
-    fun getLocalNodeId(): String {
-        return try {
-            val ks   = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-            val cert = ks.getCertificate("exergynet_edge_witness_key")
-            val hash = MessageDigest.getInstance("SHA-256").digest(cert.publicKey.encoded)
-            Base64.encodeToString(hash, Base64.NO_WRAP).take(16)
-        } catch (e: Exception) {
-            android.provider.Settings.Secure.getString(
-                context.contentResolver,
-                android.provider.Settings.Secure.ANDROID_ID
-            ) ?: "unknown_node"
-        }
-    }
+    // Canonical, deterministic node id (Base64(SHA-256(pubkey))) — identical to the
+    // UI/Node Book (ConfigManager.getMinerId) and every mesh rail. No ANDROID_ID
+    // fallback: a flipping identity is what broke all routing + D2 verification.
+    fun getLocalNodeId(): String = NodeIdentity.get(context)
 
     // ── Message composition ───────────────────────────────────────────────────
 
