@@ -4954,8 +4954,10 @@ function updateCallCreditBanner(balance) {
 }
 
 function _isCallCreditBlocked() {
-  // Allow calls if balance was never fetched (-1 or undefined) — fail open.
-  if (window._exergyCallBalance === undefined || window._exergyCallBalance < 0) return false;
+  // Fail CLOSED: no confirmed balance = no call.
+  // undefined = not yet fetched; -1 = network error. Both block until the L0 ledger
+  // confirms the user's credit state. This prevents firewall bypass of the Vampire Sink.
+  if (window._exergyCallBalance === undefined || window._exergyCallBalance < 0) return true;
   return window._exergyCallBalance < CALL_CREDIT_THRESHOLD;
 }
 

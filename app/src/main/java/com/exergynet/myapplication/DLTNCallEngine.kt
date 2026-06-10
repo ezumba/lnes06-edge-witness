@@ -2,8 +2,12 @@ package com.exergynet.myapplication
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.SurfaceTexture
 import android.media.AudioManager
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.util.Log
+import android.view.Surface
 import com.exergynet.myapplication.webrtc.SignalingClient
 import com.exergynet.myapplication.webrtc.WebRtcClient
 import com.exergynet.myapplication.webrtc.WsSignalingChannel
@@ -58,6 +62,75 @@ class DLTNCallEngine(
     @Volatile private var localVideoOn = false
     @Volatile private var remoteVideoSeen = false
     private fun recomputeVideo() { _videoActive.value = localVideoOn || remoteVideoSeen }
+
+    // ── Binary-frame decoder multiplexer (LNES-12) ────────────────────────────
+    // One MediaCodec instance per remote sender. Instantiated lazily on first frame
+    // from that sender; surface bound when the UI calls bindParticipantSurface().
+    private data class RemoteParticipant(val codec: MediaCodec, val surface: Surface) {
+        fun release() { try { codec.stop(); codec.release() } catch (_: Exception) {} }
+    }
+    private val remoteDecoders = ConcurrentHashMap<String, RemoteParticipant>()
+
+    /**
+     * Route an inbound binary payload (extracted from the 64-byte LNES-12 frame)
+     * to the MediaCodec instance keyed by [senderId]. Creates a new decoder on first
+     * arrival for each unique sender — prevents SPS collisions from multiple streams
+     * sharing a single codec instance (which crashes the decoder).
+     */
+    fun onIncomingBinaryFrame(senderId: String, payload: ByteArray) {
+        if (senderId.isEmpty() || payload.isEmpty()) return
+        val participant = remoteDecoders.getOrPut(senderId) {
+            createParticipantDecoder(senderId) ?: return
+        }
+        try {
+            val idx = participant.codec.dequeueInputBuffer(10_000L)
+            if (idx >= 0) {
+                val buf = participant.codec.getInputBuffer(idx) ?: return
+                buf.clear()
+                buf.put(payload)
+                participant.codec.queueInputBuffer(idx, 0, payload.size,
+                    System.currentTimeMillis() * 1_000L, 0)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "[DEMUX] codec feed error for $senderId: ${e.message}")
+        }
+    }
+
+    private fun createParticipantDecoder(senderId: String): RemoteParticipant? {
+        return try {
+            val codec = MediaCodec.createDecoderByType("video/avc")
+            // Offscreen placeholder surface until the UI binds a real one via bindParticipantSurface.
+            val st = SurfaceTexture(0).also { it.setDefaultBufferSize(1280, 720) }
+            val surface = Surface(st)
+            val format = MediaFormat.createVideoFormat("video/avc", 1280, 720)
+            codec.configure(format, surface, null, 0)
+            codec.start()
+            Log.i(TAG, "[DEMUX] Created H.264 decoder for sender ${senderId.take(8)}")
+            RemoteParticipant(codec, surface)
+        } catch (e: Exception) {
+            Log.e(TAG, "[DEMUX] Decoder creation failed for $senderId: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Bind a UI-provided [Surface] to the decoder for [senderId].
+     * Called by CallScreen when a ParticipantTile surface is ready.
+     * Recreates the codec so output routes to the visible surface.
+     */
+    fun bindParticipantSurface(senderId: String, surface: Surface) {
+        remoteDecoders[senderId]?.release()
+        try {
+            val codec = MediaCodec.createDecoderByType("video/avc")
+            val format = MediaFormat.createVideoFormat("video/avc", 1280, 720)
+            codec.configure(format, surface, null, 0)
+            codec.start()
+            remoteDecoders[senderId] = RemoteParticipant(codec, surface)
+            Log.i(TAG, "[DEMUX] Surface bound for ${senderId.take(8)}")
+        } catch (e: Exception) {
+            Log.e(TAG, "[DEMUX] Surface bind failed for $senderId: ${e.message}")
+        }
+    }
 
     // Group room: null = 1:1, set = GRP_* room ID
     @Volatile var activeRoomId: String? = null
@@ -498,6 +571,9 @@ class DLTNCallEngine(
         peerSessions.clear()
         _groupParticipants.value = emptyList()
         activeRoomId = null
+        // Release all per-sender MediaCodec instances
+        remoteDecoders.values.forEach { it.release() }
+        remoteDecoders.clear()
         try { callSocket?.close() } catch (_: Exception) {}
         try { serverSocket?.close() } catch (_: Exception) {}
         callSocket = null; serverSocket = null
