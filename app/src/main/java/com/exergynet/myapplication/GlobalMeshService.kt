@@ -1,8 +1,10 @@
 package com.exergynet.myapplication
 
 import android.util.Log
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -148,5 +150,41 @@ class GlobalMeshService(
             Log.w(TAG, "[WS] sendSignalEnvelope error: ${e.message}")
             false
         }
+    }
+
+    // ── Group Room Management ─────────────────────────────────────────────────
+
+    /** POST /api/v1/mesh/group/{roomId}/join/{nodeId} on the Apex Router. */
+    fun joinGroup(roomId: String, nodeId: String) {
+        Thread {
+            try {
+                val url = "${DLTNConstants.APEX_BASE_URL}/api/v1/mesh/group/$roomId/join/$nodeId"
+                val req = Request.Builder().url(url)
+                    .post("".toRequestBody("application/json".toMediaType()))
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    Log.i(TAG, "[GROUP] join $roomId / $nodeId → ${resp.code}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "[GROUP] join failed: ${e.message}")
+            }
+        }.start()
+    }
+
+    /** POST /api/v1/mesh/group/{roomId}/leave/{nodeId} on the Apex Router. */
+    fun leaveGroup(roomId: String, nodeId: String) {
+        Thread {
+            try {
+                val url = "${DLTNConstants.APEX_BASE_URL}/api/v1/mesh/group/$roomId/leave/$nodeId"
+                val req = Request.Builder().url(url)
+                    .post("".toRequestBody("application/json".toMediaType()))
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    Log.i(TAG, "[GROUP] leave $roomId / $nodeId → ${resp.code}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "[GROUP] leave failed: ${e.message}")
+            }
+        }.start()
     }
 }

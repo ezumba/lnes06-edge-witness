@@ -83,6 +83,17 @@ class MainActivity : FragmentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val fromNodeId = intent?.getStringExtra("fromNodeId") ?: return
             val type       = intent.getStringExtra("type") ?: ""
+            if (type == DLTNConstants.MSG_TYPE_GROUP_CHAT) {
+                val roomId  = intent.getStringExtra("roomId") ?: return
+                val content = intent.getStringExtra("content") ?: ""
+                val ts      = intent.getLongExtra("ts", System.currentTimeMillis())
+                // Decode base64 content to plain text
+                val text = try {
+                    String(android.util.Base64.decode(content, android.util.Base64.NO_WRAP), Charsets.UTF_8)
+                } catch (_: Exception) { content }
+                callJs("onGroupMessageReceived", roomId, fromNodeId, text, ts)
+                return
+            }
             callJs("onDLTNMessageReceived", fromNodeId, type)
         }
     }
@@ -92,6 +103,11 @@ class MainActivity : FragmentActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val state = intent?.getStringExtra("state") ?: return
             val peer  = intent.getStringExtra("peer") ?: ""
+            if (state == "GROUP_JOINED") {
+                val roomId = intent.getStringExtra("room_id") ?: ""
+                callJs("onGroupJoined", roomId, peer)
+                return
+            }
             // TASK 3: true when the OS severed the socket mid-call (not a hang-up).
             val dropped = intent.getBooleanExtra("dropped", false)
             val reason  = intent.getStringExtra("reason") ?: ""
@@ -1464,6 +1480,105 @@ class MainActivity : FragmentActivity() {
             val peer = svc.callEngine.getRemotePeer()
             lifecycleScope.launch(Dispatchers.IO) { svc.messenger.sendCallEnd(peer) }
             svc.callEngine.endCall()
+        }
+
+        // ── Group Call Bridge ──────────────────────────────────────────────
+
+        /**
+         * Add a new participant to the current call, upgrading it to a group call.
+         * Called from the "Add Person" node picker in the JS UI.
+         */
+        @JavascriptInterface
+        fun addParticipantToCall(newPeerId: String) {
+            val nodeId = newPeerId.trim()
+            if (nodeId.isEmpty()) return
+            val svc = getDLTNService() ?: return
+            val myId = svc.messenger.localNodeId()
+            val globalMesh = svc.globalMesh ?: run {
+                sendToLog(">>> [GROUP] Global mesh not available"); return
+            }
+            sendToLog("[GROUP] Adding $nodeId to call — upgrading to group session")
+            // Remote renderer for the new participant is created by CallScreen when
+            // onParticipantAdded fires. Pass null here; CallScreen registers it.
+            svc.callEngine.upgradeToGroupCall(
+                newPeerId = nodeId,
+                myNodeId = myId,
+                globalMesh = globalMesh,
+                remoteRendererForNew = null,
+            )
+        }
+
+        // ── Group Chat Bridge ──────────────────────────────────────────────
+
+        /**
+         * Create a group chat room and invite members.
+         * [memberIdsJson] is a JSON array string of node IDs (not including self).
+         */
+        @JavascriptInterface
+        fun createGroupChat(memberIdsJson: String) {
+            val svc = getDLTNService() ?: return
+            val globalMesh = svc.globalMesh ?: run {
+                sendToLog(">>> [GROUP_CHAT] Global mesh not available"); return
+            }
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    val arr = JSONArray(memberIdsJson)
+                    val members = (0 until arr.length()).map { arr.getString(it) }
+                    val roomId = "GRP_CHAT_" + java.util.UUID.randomUUID().toString().take(8).uppercase()
+                    val myId = svc.messenger.localNodeId()
+
+                    // Join all members (including self) to the room on the Apex Router
+                    globalMesh.joinGroup(roomId, myId)
+                    members.forEach { globalMesh.joinGroup(roomId, it) }
+
+                    // Send group_invite to each member
+                    val invitePayload = JSONObject()
+                        .put("room_id", roomId)
+                        .put("members", JSONArray(members + myId))
+                        .toString()
+                    members.forEach { memberId ->
+                        svc.messenger.sendGroupInvite(memberId, roomId, invitePayload)
+                    }
+
+                    // Persist the group room locally
+                    val prefs = getSharedPreferences("group_rooms", MODE_PRIVATE)
+                    val existing = try { JSONObject(prefs.getString("rooms", "{}") ?: "{}") } catch (_: Exception) { JSONObject() }
+                    existing.put(roomId, JSONArray(members + myId))
+                    prefs.edit().putString("rooms", existing.toString()).apply()
+
+                    withContext(Dispatchers.Main) {
+                        callJs("onGroupChatCreated", roomId, JSONArray(members + myId).toString())
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) { sendToLog(">>> [GROUP_CHAT] Create failed: ${e.message}") }
+                }
+            }
+        }
+
+        /**
+         * Send a message to a group chat room (GRP_CHAT_* ID).
+         * The Apex Router fans it out to all room members.
+         */
+        @JavascriptInterface
+        fun sendGroupMessage(roomId: String, content: String) {
+            if (roomId.isBlank() || content.isBlank()) return
+            val svc = getDLTNService() ?: return
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    svc.messenger.sendGroupMessage(roomId, content)
+                    withContext(Dispatchers.Main) { callJs("onGroupMessageSent", roomId) }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) { sendToLog(">>> [GROUP_CHAT] Send failed: ${e.message}") }
+                }
+            }
+        }
+
+        /** Return the locally stored group rooms as a JSON object (roomId → [memberIds]). */
+        @JavascriptInterface
+        fun getGroupRooms() {
+            val prefs = getSharedPreferences("group_rooms", MODE_PRIVATE)
+            val rooms = prefs.getString("rooms", "{}") ?: "{}"
+            callJs("onGroupRoomsLoaded", rooms)
         }
 
         // ── AREM / ASSA Status Bridge ──────────────────────────────────────

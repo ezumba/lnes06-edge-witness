@@ -240,7 +240,40 @@ class DLTNForegroundService : Service() {
             }
             DLTNConstants.MSG_TYPE_CALL_REJECT -> callEngine.endCall()
             DLTNConstants.MSG_TYPE_CALL_END    -> callEngine.endCall()
+            DLTNConstants.MSG_TYPE_GROUP_INVITE -> {
+                // Peer is upgrading an in-progress call to group. Extract roomId and join.
+                try {
+                    val payload = String(
+                        android.util.Base64.decode(content, android.util.Base64.NO_WRAP),
+                        Charsets.UTF_8
+                    )
+                    val obj = org.json.JSONObject(payload)
+                    val roomId = obj.optString("room_id")
+                    val mesh = globalMesh ?: return
+                    val myId = messenger.localNodeId()
+                    if (roomId.isNotEmpty()) {
+                        callEngine.onGroupInviteReceived(
+                            fromPeerId = fromNodeId,
+                            roomId = roomId,
+                            myNodeId = myId,
+                            globalMesh = mesh,
+                            remoteRenderer = null,   // CallScreen registers via onParticipantAdded
+                        )
+                        notifyGroupJoinToUI(roomId, fromNodeId)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[GROUP] invite parse failed: ${e.message}")
+                }
+            }
         }
+    }
+
+    private fun notifyGroupJoinToUI(roomId: String, fromNodeId: String) {
+        val i = android.content.Intent("com.exergynet.DLTN_CALL_STATE")
+        i.putExtra("state", "GROUP_JOINED")
+        i.putExtra("peer", fromNodeId)
+        i.putExtra("room_id", roomId)
+        sendBroadcast(i)
     }
 
     private fun notifyCallStateToUI(
@@ -370,6 +403,19 @@ class DLTNForegroundService : Service() {
     }
 
     private fun notifyMessageToUI(msg: DLTNMessageEntity) {
+        if (msg.type == DLTNConstants.MSG_TYPE_GROUP_CHAT) {
+            // Group message: notify the UI with room context so it routes to the right conversation
+            val intent = Intent("com.exergynet.DLTN_MESSAGE_RECEIVED").apply {
+                putExtra("fromNodeId", msg.fromNodeId)
+                putExtra("type",       msg.type)
+                putExtra("roomId",     msg.toNodeId)   // toNodeId = GRP_CHAT_* room
+                putExtra("content",    msg.content)
+                putExtra("ts",         msg.timestampMs)
+                setPackage(packageName)
+            }
+            sendBroadcast(intent)
+            return
+        }
         val intent = Intent("com.exergynet.DLTN_MESSAGE_RECEIVED").apply {
             putExtra("fromNodeId", msg.fromNodeId)
             putExtra("type",       msg.type)
