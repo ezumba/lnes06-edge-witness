@@ -1402,7 +1402,7 @@
             </div>
         </div>
         <button class="btn-danger" onclick="confirmSignOut()">Sign Out</button>
-        <p style="font-size:11px;color:var(--app-hint);text-align:center;margin-top:12px">ExergyNet Edge Witness v1.7.1 · LNES-06 + LNES-12</p>
+        <p style="font-size:11px;color:var(--app-hint);text-align:center;margin-top:12px">ExergyNet Edge Witness v1.7.2 · LNES-06 + LNES-12</p>
     </div>
 </div>
 
@@ -1712,7 +1712,10 @@
                 <i class="ti ti-message-2" style="font-size:24px;color:var(--app-teal)"></i><span style="font-size:13px;color:var(--app-text)">Message</span>
             </div>
             <div onclick="nodeDetailCall()" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;border:.5px solid var(--app-border);border-radius:12px;cursor:pointer;-webkit-tap-highlight-color:transparent">
-                <i class="ti ti-phone" style="font-size:24px;color:var(--app-teal)"></i><span style="font-size:13px;color:var(--app-text)">Call</span>
+                <i class="ti ti-phone" style="font-size:24px;color:var(--app-teal)"></i><span style="font-size:13px;color:var(--app-text)">Audio</span>
+            </div>
+            <div onclick="nodeDetailVideoCall()" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;border:.5px solid var(--app-border);border-radius:12px;cursor:pointer;-webkit-tap-highlight-color:transparent">
+                <i class="ti ti-video" style="font-size:24px;color:var(--app-teal)"></i><span style="font-size:13px;color:var(--app-text)">Video</span>
             </div>
             <div onclick="nodeDetailEdit()" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;border:.5px solid var(--app-border);border-radius:12px;cursor:pointer;-webkit-tap-highlight-color:transparent">
                 <i class="ti ti-edit" style="font-size:24px;color:var(--app-muted)"></i><span style="font-size:13px;color:var(--app-text)">Edit name</span>
@@ -4629,6 +4632,11 @@ function nodeDetailCall() {
   closeNodeDetail();
   dltnCall(id);
 }
+function nodeDetailVideoCall() {
+  var id = window._detailNodeId; if (!id) return;
+  closeNodeDetail();
+  dltnVideoCall(id);
+}
 function nodeDetailEdit() {
   var id = window._detailNodeId; if (!id) return;
   openNodeBookSheet(id);   // sheet opens over the detail screen, alias prefilled
@@ -4824,6 +4832,19 @@ function dltnCall(nodeId) {
 }
 
 function callContact(nodeId) { dltnCall(nodeId); }
+
+function dltnVideoCall(nodeId) {
+  if (!nodeId) return;
+  if (window._dltnCallInFlight) return;
+  window._dltnCallInFlight = true;
+  setTimeout(() => { window._dltnCallInFlight = false; }, 3000);
+  if (window.ExergyKinesis && window.ExergyKinesis.initiateDltnVideoCall) {
+    window.ExergyKinesis.initiateDltnVideoCall(nodeId);
+  } else {
+    window._dltnCallInFlight = false;
+    showToast('Video calling unavailable', 'warn');
+  }
+}
 
 function _truncId(id) {
   if (!id) return 'Unknown Node';

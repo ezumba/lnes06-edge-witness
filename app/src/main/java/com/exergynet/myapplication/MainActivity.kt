@@ -1425,7 +1425,17 @@ class MainActivity : FragmentActivity() {
             // The previous explicit messenger.sendCallInvite() was ungated, so every
             // repeated tap queued another invite bubble (call-signal flood). Routing
             // solely through startOutgoingCall() makes the IDLE guard authoritative.
-            svc.callEngine.startOutgoingCall(nodeId)
+            svc.callEngine.startOutgoingCall(nodeId, withVideo = false)
+        }
+
+        // Start a call with the camera ON from the first frame (separate Video button).
+        @JavascriptInterface
+        fun initiateDltnVideoCall(peerId: String) {
+            val nodeId = peerId.trim()
+            if (nodeId.isEmpty()) return
+            val svc = getDLTNService() ?: return
+            sendToLog("[CALL] Opening sovereign DLTN VIDEO call to ${nodeId.take(10)}…")
+            svc.callEngine.startOutgoingCall(nodeId, withVideo = true)
         }
 
         // Back-compat alias for existing UI callers (map popup, conversation view).

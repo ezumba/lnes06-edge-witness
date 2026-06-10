@@ -45,6 +45,8 @@ class WebRtcClient(
     /** EMPTY for local mesh calls; the Sovereign TURN server for global calls. */
     private val iceServers: List<PeerConnection.IceServer> = emptyList(),
     private val onConnectionStateChange: (PeerConnection.IceConnectionState) -> Unit = {},
+    /** Fired when the remote peer's video track arrives (so the UI can go full-screen). */
+    private val onRemoteVideo: () -> Unit = {},
 ) : SignalingClientListener {
 
     private val TAG = "WebRtcClient"
@@ -154,12 +156,14 @@ class WebRtcClient(
                 if (track is VideoTrack) {
                     remoteVideoTrack = track
                     remoteRenderer?.let { track.addSink(it) }
+                    onRemoteVideo()
                 }
             }
             override fun onAddStream(stream: MediaStream?) {
                 stream?.videoTracks?.firstOrNull()?.let { vt ->
                     remoteVideoTrack = vt
                     remoteRenderer?.let { vt.addSink(it) }
+                    onRemoteVideo()
                 }
             }
             override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
@@ -180,17 +184,20 @@ class WebRtcClient(
         localAudioTrack = factory.createAudioTrack("dltn_audio", localAudioSource).apply { setEnabled(true) }
         peerConnection?.addTrack(localAudioTrack, listOf(STREAM_ID))
 
-        // Video (front camera) — optional; audio-only if no camera.
+        // Video (front camera). The m=video line is negotiated up front so the
+        // call can be UPGRADED to video later without renegotiation — but the track
+        // starts DISABLED and the camera is NOT opened until setVideoEnabled(true).
+        // This keeps a voice call a voice call (no camera light, no preview).
         val capturer = createFrontCameraCapturer()
         if (capturer != null) {
             videoCapturer = capturer
             surfaceHelper = SurfaceTextureHelper.create("CaptureThread", rootEglBase.eglBaseContext)
             localVideoSource = factory.createVideoSource(capturer.isScreencast)
             capturer.initialize(surfaceHelper, context, localVideoSource!!.capturerObserver)
-            localVideoTrack = factory.createVideoTrack("dltn_video", localVideoSource).apply { setEnabled(true) }
+            localVideoTrack = factory.createVideoTrack("dltn_video", localVideoSource).apply { setEnabled(false) }
             localRenderer?.let { localVideoTrack?.addSink(it) }
             peerConnection?.addTrack(localVideoTrack, listOf(STREAM_ID))
-            startCapture()
+            // No startCapture() here — voice-first.
         } else {
             Log.w(TAG, "[RTC] no front camera — audio only")
         }
