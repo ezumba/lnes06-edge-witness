@@ -56,6 +56,9 @@ class GlobalMeshService(
     @Volatile private var connected = false
     private val shouldRun = AtomicBoolean(false)
 
+    /** LNES-12 global WebRTC signaling: inbound SDP/ICE frames from a peer. */
+    @Volatile var onRtcSignal: ((fromId: String, rtcJson: String) -> Unit)? = null
+
     // Active-call audio routing state.
     @Volatile private var audioIn: QueueInputStream? = null
 
@@ -81,8 +84,16 @@ class GlobalMeshService(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                // Signaling envelope (CALL_INVITE / ACCEPT / END). Route to the
-                // messenger so the existing call pipeline rings / updates state.
+                try {
+                    // WebRTC signaling frames (SDP/ICE) are tagged kind=webrtc and
+                    // routed to the call engine; everything else is a DLTN envelope
+                    // (messages + CALL_INVITE/ACCEPT/END) for the messenger pipeline.
+                    val o = org.json.JSONObject(text)
+                    if (o.optString("kind") == "webrtc") {
+                        onRtcSignal?.invoke(o.optString("from_id"), o.optString("rtc"))
+                        return
+                    }
+                } catch (_: Exception) { /* not JSON-with-kind — fall through */ }
                 try { onSignalEnvelope(text.toByteArray(Charsets.UTF_8)) }
                 catch (e: Exception) { Log.w(TAG, "[WS] signal route error: ${e.message}") }
             }
@@ -124,6 +135,21 @@ class GlobalMeshService(
     }
 
     // ── Signaling ─────────────────────────────────────────────────────────────
+
+    /** Push a WebRTC signaling frame (SDP/ICE JSON) to [targetNodeId] over the WS. */
+    fun sendRtcSignal(targetNodeId: String, rtcJson: String): Boolean {
+        val sock = ws ?: return false
+        return try {
+            val frame = JSONObject()
+                .put("kind", "webrtc")
+                .put("target_id", targetNodeId)
+                .put("from_id", myNodeId)
+                .put("rtc", rtcJson)
+            sock.send(frame.toString())
+        } catch (e: Exception) {
+            Log.w(TAG, "[WS] sendRtcSignal error: ${e.message}"); false
+        }
+    }
 
     /** Send a signed DLTN call envelope to [targetNodeId] over the global rail. */
     fun sendSignalEnvelope(targetNodeId: String, envelopeBytes: ByteArray): Boolean {

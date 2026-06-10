@@ -1,8 +1,10 @@
 package com.exergynet.myapplication
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -55,16 +57,20 @@ class DLTNAudioEngine {
     private var onClosed: (() -> Unit)? = null
     private val closedNotified = AtomicBoolean(false)
 
+    private val isMuted = AtomicBoolean(false)
+    private var audioManager: AudioManager? = null
+
     /**
      * Begin full-duplex streaming over the supplied socket streams. Idempotent.
      * [onClosed] fires once if a stream drops on its own (e.g. the remote peer
      * hangs up / the socket closes) while still active — letting the caller tear
      * the call down. It does NOT fire on a deliberate [stop].
      */
-    fun start(input: InputStream, output: OutputStream, onClosed: (() -> Unit)? = null) {
+    fun start(context: Context, input: InputStream, output: OutputStream, onClosed: (() -> Unit)? = null) {
         if (active.getAndSet(true)) return
         this.onClosed = onClosed
         closedNotified.set(false)
+        audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         Log.i(TAG, "[AUDIO] Engine start — ${SAMPLE_RATE}Hz mono PCM full-duplex")
         scope.launch { captureLoop(output) }
         scope.launch { playbackLoop(input) }
@@ -81,12 +87,23 @@ class DLTNAudioEngine {
         if (!active.getAndSet(false)) return
         releaseRecord()
         releaseTrack()
+        audioManager?.isSpeakerphoneOn = false // Turn off speaker on stop
         Log.i(TAG, "[AUDIO] Engine stopped — mic + speaker released")
     }
 
     fun destroy() {
         stop()
         scope.cancel()
+    }
+
+    fun setMuted(muted: Boolean) {
+        isMuted.set(muted)
+        Log.i(TAG, "[AUDIO] Mute set to $muted")
+    }
+
+    fun setSpeakerphoneOn(on: Boolean) {
+        audioManager?.isSpeakerphoneOn = on
+        Log.i(TAG, "[AUDIO] Speakerphone set to $on")
     }
 
     // ── Capture: mic → socket ────────────────────────────────────────────────
@@ -103,12 +120,18 @@ class DLTNAudioEngine {
 
         val out = DataOutputStream(output)
         val buf = ByteArray(DLTNConstants.VOICE_BUFFER_BYTES)
+        val muteBuf = ByteArray(DLTNConstants.VOICE_BUFFER_BYTES) // A silent buffer
         try {
             while (active.get()) {
                 val read = rec.read(buf, 0, buf.size)
                 if (read > 0) {
-                    out.writeInt(read)
-                    out.write(buf, 0, read)
+                    if (isMuted.get()) {
+                        out.writeInt(read)
+                        out.write(muteBuf, 0, read)
+                    } else {
+                        out.writeInt(read)
+                        out.write(buf, 0, read)
+                    }
                     out.flush()
                 } else if (read < 0) {
                     break

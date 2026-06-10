@@ -9,4 +9,5 @@
     <color name="white">#FFFFFFFF</color>
     <color name="app_bg">#0D1117</color>
     <color name="orange_500">#FFC107</color>
+    <color name="ai_blue">#4285F4</color>
 </resources>

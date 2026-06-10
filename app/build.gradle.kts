@@ -25,8 +25,8 @@ android {
         applicationId = "com.exergynet.myapplication"
         minSdk = 29
         targetSdk = 36
-        versionCode = 27
-        versionName = "1.6.3"
+        versionCode = 28
+        versionName = "1.7.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -98,4 +98,13 @@ dependencies {
     // LNES-12 Sovereign WebSocket Relay (GLOBAL call fallback). OkHttp WebSocket —
     // no WebRTC, no Firebase. okio ships transitively with okhttp 4.x.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // WebRTC — full-duplex audio + video over our sovereign mesh transport.
+    // NOTE: the original `org.webrtc:google-webrtc:1.0.32006` only ever lived on
+    // JCenter (shut down) and no longer resolves from google()/mavenCentral(). The
+    // maintained drop-in below ships the IDENTICAL `org.webrtc.*` API on
+    // mavenCentral, so all WebRTC code compiles unchanged. Signaling rides our own
+    // P2P TCP socket (SignalingClient) — no external signaling server.
+    implementation("io.getstream:stream-webrtc-android:1.3.8")
+    implementation("com.google.code.gson:gson:2.11.0")
 }
