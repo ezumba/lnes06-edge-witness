@@ -1482,6 +1482,43 @@ class MainActivity : FragmentActivity() {
             svc.callEngine.endCall()
         }
 
+        // ── L0 Call Credit Gate ────────────────────────────────────────────
+
+        /**
+         * Fetch the internal ExergyNet L0 ledger balance for this node.
+         * Returns micro-USDC credits earned via LNES-06 witnessing.
+         * Fires [onCallBalanceChecked] on the JS side.
+         *
+         * Endpoint: GET /api/v1/miners/{nodeId}/balance
+         * Response JSON: { "balance_micro_usdc": 12345 }
+         *
+         * Fails open (-1) so calls are never blocked by a network error.
+         */
+        @JavascriptInterface
+        fun checkCallBalance() {
+            lifecycleScope.launch(Dispatchers.IO) {
+                var balance = -1L
+                try {
+                    val nodeId = configManager.getMinerId()
+                    if (nodeId.isNotEmpty()) {
+                        val url = "${DLTNConstants.APEX_BASE_URL}/api/v1/miners/$nodeId/balance"
+                        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                        conn.connectTimeout = 8_000
+                        conn.readTimeout   = 8_000
+                        conn.setRequestProperty("Accept", "application/json")
+                        conn.connect()
+                        if (conn.responseCode == 200) {
+                            val body = conn.inputStream.bufferedReader().readText()
+                            val obj = org.json.JSONObject(body)
+                            balance = obj.optLong("balance_micro_usdc", -1L)
+                        }
+                        conn.disconnect()
+                    }
+                } catch (_: Exception) { /* fail open — balance stays -1 */ }
+                withContext(Dispatchers.Main) { callJs("onCallBalanceChecked", balance) }
+            }
+        }
+
         // ── Group Call Bridge ──────────────────────────────────────────────
 
         /**

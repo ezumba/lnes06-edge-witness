@@ -10,6 +10,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONObject
+import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -52,6 +53,12 @@ class GlobalMeshService(
     /** LNES-12 global WebRTC signaling: inbound SDP/ICE frames from a peer. */
     @Volatile var onRtcSignal: ((fromId: String, rtcJson: String) -> Unit)? = null
 
+    /**
+     * Inbound binary frame callback: fires with (senderId, payload) when a
+     * 64-byte-headered binary frame arrives. Consumers index decoders by senderId.
+     */
+    @Volatile var onBinaryFrame: ((senderId: String, payload: ByteArray) -> Unit)? = null
+
     fun isConnected(): Boolean = connected
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -89,8 +96,19 @@ class GlobalMeshService(
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                // Binary frames were previously used for raw PCM audio. The audio
-                // engine is retired — WebRTC carries all media. Frames are discarded.
+                // Binary frames carry the 64-byte dual-ID header defined in LNES-12:
+                //   [0..43]  SENDER_ID  (space-padded UTF-8)
+                //   [44..63] TARGET_ID or GRP_ROOM_ID (space-padded UTF-8)
+                //   [64..]   payload (H.264 NAL unit, PCM chunk, or future codec)
+                val raw = bytes.toByteArray()
+                if (raw.size < 64) return   // malformed — discard
+                try {
+                    val (senderId, _) = parseBinaryHeader(raw)
+                    val payload = raw.sliceArray(64 until raw.size)
+                    onBinaryFrame?.invoke(senderId, payload)
+                } catch (e: Exception) {
+                    Log.w(TAG, "[WS] binary frame parse error: ${e.message}")
+                }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -169,6 +187,46 @@ class GlobalMeshService(
                 Log.w(TAG, "[GROUP] join failed: ${e.message}")
             }
         }.start()
+    }
+
+    // ── Binary Frame Protocol (LNES-12 Dual-ID Header) ────────────────────────
+
+    /**
+     * Build a 64-byte framed binary packet:
+     *   Bytes  [0..43]  : SENDER_ID (this node), space-padded to 44 bytes
+     *   Bytes [44..63]  : TARGET_ID or GRP_ROOM_ID, space-padded to 20 bytes
+     *   Bytes [64..]    : payload
+     */
+    fun buildBinaryFrame(targetOrRoomId: String, payload: ByteArray): ByteArray {
+        val buf = ByteBuffer.allocate(64 + payload.size)
+        val sender = myNodeId.take(44).padEnd(44)
+        val target = targetOrRoomId.take(20).padEnd(20)
+        buf.put(sender.toByteArray(Charsets.UTF_8))
+        buf.put(target.toByteArray(Charsets.UTF_8))
+        buf.put(payload)
+        return buf.array()
+    }
+
+    /**
+     * Parse the 64-byte header, returning (senderId, targetId) with whitespace trimmed.
+     * Throws if the frame is shorter than 64 bytes.
+     */
+    fun parseBinaryHeader(frame: ByteArray): Pair<String, String> {
+        require(frame.size >= 64) { "frame too short (${frame.size})" }
+        val senderId = String(frame.sliceArray(0 until 44), Charsets.UTF_8).trim()
+        val targetId = String(frame.sliceArray(44 until 64), Charsets.UTF_8).trim()
+        return Pair(senderId, targetId)
+    }
+
+    /** Send a binary payload with the 64-byte header over the WebSocket. */
+    fun sendBinaryFrame(targetOrRoomId: String, payload: ByteArray): Boolean {
+        val sock = ws ?: return false
+        return try {
+            val frame = buildBinaryFrame(targetOrRoomId, payload)
+            sock.send(ByteString.of(*frame))
+        } catch (e: Exception) {
+            Log.w(TAG, "[WS] sendBinaryFrame error: ${e.message}"); false
+        }
     }
 
     /** POST /api/v1/mesh/group/{roomId}/leave/{nodeId} on the Apex Router. */

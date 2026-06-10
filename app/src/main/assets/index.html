@@ -1579,6 +1579,15 @@
         <div class="dial-tab" id="dtab-nodes" onclick="switchDialTab('nodes')">Nodes</div>
     </div>
 
+    <!-- L0 Credit Banner — shown when balance < threshold -->
+    <div id="call-credit-banner" style="display:none;align-items:center;gap:10px;background:rgba(255,180,0,.10);border-bottom:.5px solid rgba(255,180,0,.28);padding:10px 14px;flex-shrink:0">
+        <i class="ti ti-coin" style="font-size:18px;color:#ffb400;flex-shrink:0"></i>
+        <div style="flex:1;min-width:0">
+            <div id="call-credit-msg" style="font-size:12px;color:#ffb400;line-height:1.4"></div>
+        </div>
+        <div onclick="go('s-jobs')" style="font-size:11px;font-weight:700;color:#ffb400;cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent">Earn →</div>
+    </div>
+
     <!-- RECENTS VIEW -->
     <div id="dview-recents" class="dial-body">
         <div style="padding:14px 16px 8px">
@@ -2316,6 +2325,7 @@
       if (id === 's-messages') { loadDLTNContacts(); }
       if (id === 's-streets') { initStreetsMap(); }
       if (id === 's-jobs') { initJobsMap(); }
+      if (id === 's-comms') { checkCallBalance(); }
     }
 
     // ════════════════════════════════════════════════════════════
@@ -4911,11 +4921,56 @@ function onNodeQrScanError(msg) {
 }
 
 // ════════════════════════════════════════════════════════════
+// ECONOMIC GATE — L0 Credit Balance
+// ════════════════════════════════════════════════════════════
+// Threshold (µUSDC): 1000 = 0.001 USDC. Users earn credits via LNES-06 witnessing.
+const CALL_CREDIT_THRESHOLD = 1000;
+
+// Cached balance. undefined = not yet checked. -1 = fetch failed (allow calls).
+window._exergyCallBalance = undefined;
+
+function checkCallBalance() {
+  if (window.ExergyKinesis && window.ExergyKinesis.checkCallBalance)
+    window.ExergyKinesis.checkCallBalance();
+}
+
+// Called by Android bridge after fetching the L0 balance
+function onCallBalanceChecked(balanceMicroUsdc) {
+  window._exergyCallBalance = balanceMicroUsdc;
+  updateCallCreditBanner(balanceMicroUsdc);
+}
+
+function updateCallCreditBanner(balance) {
+  const banner = document.getElementById('call-credit-banner');
+  if (!banner) return;
+  if (balance >= 0 && balance < CALL_CREDIT_THRESHOLD) {
+    const usdc = (balance / 1_000_000).toFixed(6);
+    banner.style.display = 'flex';
+    document.getElementById('call-credit-msg').textContent =
+      `Balance: ${usdc} USDC — Witness your environment for 5 minutes to earn call credits.`;
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+function _isCallCreditBlocked() {
+  // Allow calls if balance was never fetched (-1 or undefined) — fail open.
+  if (window._exergyCallBalance === undefined || window._exergyCallBalance < 0) return false;
+  return window._exergyCallBalance < CALL_CREDIT_THRESHOLD;
+}
+
+// ════════════════════════════════════════════════════════════
 // DLTN VOICE CALLS
 // ════════════════════════════════════════════════════════════
 // Sovereign mesh call — routes by miner_id over DLTN (TCP over WiFi / BLE), never cellular.
 function dltnCall(nodeId) {
   if (!nodeId) return;
+  if (_isCallCreditBlocked()) {
+    showToast('Earn Exergy Credits to Call — witness your environment for 5 min', 'warn');
+    if (document.getElementById('s-comms')?.classList.contains('active'))
+      document.getElementById('call-credit-banner')?.style.setProperty('display', 'flex');
+    return;
+  }
   // BUG 3 FIX: debounce the call button. Rapid repeated taps previously fired
   // multiple initiateDltnCall() bridge calls before the engine flipped out of
   // IDLE, queuing duplicate call_invite bubbles. Block re-entry for 3s; the
@@ -4937,6 +4992,10 @@ function callContact(nodeId) { dltnCall(nodeId); }
 
 function dltnVideoCall(nodeId) {
   if (!nodeId) return;
+  if (_isCallCreditBlocked()) {
+    showToast('Earn Exergy Credits to Call — witness your environment for 5 min', 'warn');
+    return;
+  }
   if (window._dltnCallInFlight) return;
   window._dltnCallInFlight = true;
   setTimeout(() => { window._dltnCallInFlight = false; }, 3000);
