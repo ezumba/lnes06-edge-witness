@@ -85,6 +85,11 @@ fun CallScreen(callEngine: DLTNCallEngine, onFinished: () -> Unit) {
             factory = { ctx ->
                 SurfaceViewRenderer(ctx).also { r ->
                     r.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                    // init() confirms the EGL surface is physically ready BEFORE we
+                    // call setRenderers — this is the synchronization point that
+                    // prevents the black-screen race between WebRTC track delivery
+                    // and Compose's async view inflation.
+                    r.init(callEngine.eglBaseContext(), null)
                     remoteRenderer.value = r
                     callEngine.setRenderers(localRenderer.value, r)
                 }
@@ -122,6 +127,8 @@ fun CallScreen(callEngine: DLTNCallEngine, onFinished: () -> Unit) {
                             r.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
                             r.setMirror(true)
                             r.setZOrderMediaOverlay(true)
+                            // Same init-before-setRenderers contract as the remote surface.
+                            r.init(callEngine.eglBaseContext(), null)
                             localRenderer.value = r
                             callEngine.setRenderers(r, remoteRenderer.value)
                         }
@@ -164,6 +171,11 @@ fun CallScreen(callEngine: DLTNCallEngine, onFinished: () -> Unit) {
                             }
                             RoundAction("📹", "Video", PANELBTN(isVideoOn)) {
                                 isVideoOn = !isVideoOn; callEngine.setVideoEnabled(isVideoOn)
+                            }
+                            if (isVideoOn) {
+                                RoundAction("🔄", "Flip", PANELBTN(false)) {
+                                    callEngine.switchCamera()
+                                }
                             }
                             RoundAction(if (isMuted) "🔇" else "🎤", "Mute", PANELBTN(isMuted)) {
                                 isMuted = !isMuted; callEngine.setMuted(isMuted)

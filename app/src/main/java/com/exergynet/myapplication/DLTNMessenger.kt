@@ -178,6 +178,45 @@ class DLTNMessenger(
 
             db.dltnMessageDao().insert(msg)
 
+            // LNES-10 Drop Relay: peer forwarded a drop they created offline.
+            // Store it in Room as RELAYED; WorkManager will upload when we have
+            // connectivity. We do NOT re-broadcast (one-hop gossip).
+            if (msgType == DLTNConstants.MSG_TYPE_DROP_RELAY) {
+                try {
+                    val dropJson = String(
+                        Base64.decode(msg.content, Base64.NO_WRAP), Charsets.UTF_8
+                    )
+                    val d = org.json.JSONObject(dropJson)
+                    val relayLocalId = d.optString("local_id").ifEmpty {
+                        java.util.UUID.randomUUID().toString()
+                    }
+                    val dropDb = ExergyDatabase.getDatabase(context)
+                    dropDb.ghostDropDao().insert(GhostDropEntity(
+                        localId        = relayLocalId,
+                        message        = d.optString("message"),
+                        type           = d.optString("type", "open"),
+                        lat            = d.optDouble("lat", 0.0),
+                        lon            = d.optDouble("lon", 0.0),
+                        radiusM        = d.optInt("radius_m", 100),
+                        ttlSecs        = d.optInt("ttl_secs", 86400),
+                        groups         = d.optString("groups", ""),
+                        category       = d.optString("category", "INTEL"),
+                        timestamp      = d.optLong("timestamp", System.currentTimeMillis()),
+                        nonceHex       = d.optString("nonce"),
+                        signature      = d.optString("signature"),
+                        minerId        = d.optString("miner_id"),
+                        attachmentJson = "",
+                        syncStatus     = "RELAYED",
+                        createdMs      = System.currentTimeMillis(),
+                    ))
+                    DropSyncWorker.enqueue(context)
+                    Log.i(TAG, "[DROP_RELAY] Stored relayed drop ${relayLocalId.take(8)} from ${msg.fromNodeId.take(8)}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "[DROP_RELAY] Failed to store relayed drop: ${e.message}")
+                }
+                return   // drop_relay is not surfaced in the chat UI
+            }
+
             // Route call signals to CallEngine via callback — pass decoded content
             // so the receiver can extract caller IP:port from call_invite payload.
             if (msgType in listOf(
@@ -213,6 +252,33 @@ class DLTNMessenger(
         } catch (e: Exception) {
             Log.w(TAG, "[RECV] Parse error: ${e.message}")
         }
+    }
+
+    // ── LNES-10 Ghost Drop mesh broadcast ────────────────────────────────────
+
+    /**
+     * Broadcast a sealed drop payload to [toNodeId] over the DLTN mesh.
+     * The drop JSON is base64-encoded and sent as a [DLTNConstants.MSG_TYPE_DROP_RELAY]
+     * envelope. The receiver stores the drop in their Room DB (PENDING/RELAYED) and
+     * uploads via WorkManager when they next have connectivity.
+     *
+     * This is a one-hop gossip — receivers do NOT re-broadcast. That keeps the
+     * mesh from flooding during an internet blackout while still giving the drop a
+     * high probability of reaching at least one online peer.
+     */
+    suspend fun broadcastDrop(toNodeId: String, dropJson: String) {
+        val content = Base64.encodeToString(
+            dropJson.toByteArray(Charsets.UTF_8), Base64.NO_WRAP
+        )
+        val msg = composeMessage(
+            toNodeId = toNodeId,
+            type     = DLTNConstants.MSG_TYPE_DROP_RELAY,
+            content  = content,
+        )
+        db.dltnMessageDao().insert(msg)
+        // Race the global WebSocket rail in addition to local BLE outbox.
+        try { globalSend?.invoke(toNodeId, buildEnvelopeBytes(msg)) } catch (_: Exception) {}
+        Log.i(TAG, "[DROP_RELAY] broadcast drop → ${toNodeId.take(8)}")
     }
 
     // ── Outbox delivery ───────────────────────────────────────────────────────

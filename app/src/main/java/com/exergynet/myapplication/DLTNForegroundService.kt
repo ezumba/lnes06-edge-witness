@@ -5,7 +5,13 @@ import android.app.*
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -19,6 +25,7 @@ class DLTNForegroundService : Service() {
 
     private val TAG   = "DLTNService"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var incomingRingtone: Ringtone? = null
 
     private  lateinit var dltnManager: DLTNManager
     internal lateinit var messenger:   DLTNMessenger
@@ -250,6 +257,18 @@ class DLTNForegroundService : Service() {
             DLTNCallEngine.CallState.RINGING,
             DLTNCallEngine.CallState.CALLING,
             DLTNCallEngine.CallState.CONNECTED -> {
+                // Stop ringing once the call is answered or outgoing.
+                if (state != DLTNCallEngine.CallState.RINGING) {
+                    try { incomingRingtone?.stop(); incomingRingtone = null } catch (_: Exception) {}
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                            getSystemService(VibratorManager::class.java)?.defaultVibrator?.cancel()
+                        } else {
+                            @Suppress("DEPRECATION")
+                            getSystemService(Vibrator::class.java)?.cancel()
+                        }
+                    } catch (_: Exception) {}
+                }
                 startCallForeground(peer)
                 // Surface the NATIVE call UI (the WebView cannot render WebRTC
                 // video). Best-effort: on Android 10+ background-activity-start
@@ -308,6 +327,16 @@ class DLTNForegroundService : Service() {
     }
 
     private fun endCallForeground() {
+        // Stop ringtone and vibration.
+        try { incomingRingtone?.stop(); incomingRingtone = null } catch (_: Exception) {}
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                getSystemService(VibratorManager::class.java)?.defaultVibrator?.cancel()
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Vibrator::class.java)?.cancel()
+            }
+        } catch (_: Exception) {}
         // Dismiss the ringing full-screen notification if it's still up.
         try {
             getSystemService(NotificationManager::class.java)
@@ -350,9 +379,34 @@ class DLTNForegroundService : Service() {
     }
 
     private fun showIncomingCallNotification(fromNodeId: String) {
-        // Full-screen intent → CallActivity. This is the OS-sanctioned way to ring:
-        // when the device is locked/idle the native call UI is shown directly; when
-        // unlocked, a heads-up notification appears and tapping opens CallActivity.
+        // Play ringtone directly — notification-triggered sound is unreliable when
+        // the app already holds audio focus or the screen is on.
+        try {
+            incomingRingtone?.stop()
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            incomingRingtone = RingtoneManager.getRingtone(this, uri)?.also {
+                it.audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+                it.isLooping = true
+                it.play()
+            }
+        } catch (e: Exception) { Log.w(TAG, "[CALL] ringtone play failed: ${e.message}") }
+
+        // Vibrate: 600ms on / 400ms off, repeat indefinitely.
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                val vm = getSystemService(VibratorManager::class.java)?.defaultVibrator
+                vm?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 600, 400), 0))
+            } else {
+                @Suppress("DEPRECATION")
+                val vm = getSystemService(Vibrator::class.java)
+                @Suppress("DEPRECATION")
+                vm?.vibrate(longArrayOf(0, 600, 400), 0)
+            }
+        } catch (e: Exception) { Log.w(TAG, "[CALL] vibrate failed: ${e.message}") }
+
         val callIntent = Intent(this, CallActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
@@ -362,7 +416,7 @@ class DLTNForegroundService : Service() {
         )
         val notif = Notification.Builder(this, DLTNConstants.DLTN_CALL_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_call)
-            .setContentTitle("Incoming Call")
+            .setContentTitle("Incoming ExergyNet Call")
             .setContentText("From node ${fromNodeId.take(8)}")
             .setContentIntent(pi)
             .setFullScreenIntent(pi, true)
@@ -419,11 +473,23 @@ class DLTNForegroundService : Service() {
         // TASK 1: a separate IMPORTANCE_HIGH channel for active calls. Channel
         // importance is immutable once created, so the relay channel cannot simply
         // be "raised" — the active-call banner needs its own high channel.
+        val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
         val callChannel = NotificationChannel(
             DLTNConstants.DLTN_CALL_CHANNEL_ID,
             DLTNConstants.DLTN_CALL_CHANNEL_NAME,
             NotificationManager.IMPORTANCE_HIGH
-        ).apply { description = "Active ExergyNet voice/data call" }
+        ).apply {
+            description = "Incoming ExergyNet call ring"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 600, 200, 600, 200, 600)
+            setSound(
+                ringtoneUri,
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+        }
         mgr.createNotificationChannel(callChannel)
     }
 

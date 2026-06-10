@@ -1401,6 +1401,13 @@
                 <i class="ti ti-chevron-right" style="color:var(--app-muted)"></i>
             </div>
         </div>
+        <div id="update-btn-wrap" style="margin-bottom:12px">
+            <button class="btn-secondary" style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px" onclick="downloadLatestVersion()">
+                <i class="ti ti-download"></i>
+                <span id="update-btn-label">Download Latest Version</span>
+            </button>
+            <p id="update-status" style="font-size:11px;color:var(--app-muted);text-align:center;margin-top:6px;display:none"></p>
+        </div>
         <button class="btn-danger" onclick="confirmSignOut()">Sign Out</button>
         <p style="font-size:11px;color:var(--app-hint);text-align:center;margin-top:12px">ExergyNet Edge Witness v1.7.2 · LNES-06 + LNES-12</p>
     </div>
@@ -3697,6 +3704,45 @@ window.hydrateConfiguration = function(ip, wallet, profilePic) {
           {label:'Abandon', className:'btn-danger', onclick:`if(window.ExergyKinesis && window.ExergyKinesis.abandonActiveJob) window.ExergyKinesis.abandonActiveJob(); if(typeof countdownInterval !== 'undefined') clearInterval(countdownInterval); closeModal(); go('s-jobs'); showToast('Job abandoned.','warn');`}
         ]
       );
+    }
+
+    function downloadLatestVersion() {
+      if (!window.ExergyKinesis) { showToast('Update not available in browser preview.', 'warn'); return; }
+      const btn = document.getElementById('update-btn-label');
+      const status = document.getElementById('update-status');
+      btn.textContent = 'Downloading…';
+      status.style.display = 'block';
+      status.textContent = 'Connecting to ExergyNet…';
+      window.ExergyKinesis.downloadLatestApk();
+    }
+
+    function onApkDownloadProgress(state) {
+      const btn = document.getElementById('update-btn-label');
+      const status = document.getElementById('update-status');
+      if (!btn || !status) return;
+      if (state === 'downloading') {
+        btn.textContent = 'Downloading…';
+        status.textContent = 'Starting download…';
+      } else if (state.startsWith('progress:')) {
+        const pct = state.split(':')[1];
+        btn.textContent = 'Downloading ' + pct + '%';
+        status.textContent = pct + '% complete';
+      } else if (state === 'installing') {
+        btn.textContent = 'Installing…';
+        status.textContent = 'Opening installer — tap Install to continue.';
+        status.style.color = 'var(--app-teal)';
+        setTimeout(function() {
+          btn.textContent = 'Download Latest Version';
+          status.style.display = 'none';
+          status.style.color = '';
+        }, 6000);
+      } else if (state.startsWith('error:')) {
+        btn.textContent = 'Download Latest Version';
+        const msg = state.replace('error:', '');
+        status.textContent = 'Failed: ' + msg;
+        status.style.color = '#e53935';
+        setTimeout(function() { status.style.display = 'none'; status.style.color = ''; }, 5000);
+      }
     }
 
     function confirmSignOut() {

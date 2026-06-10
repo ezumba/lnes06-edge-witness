@@ -4,4 +4,6 @@
     <cache-path name="exergy_images" path="exergy_images/" />
     <!-- External storage fallback -->
     <external-path name="my_images" path="Android/data/com.exergynet.myapplication/files/Pictures" />
+    <!-- Downloaded APK for self-update -->
+    <cache-path name="apk_updates" path="apk_updates/" />
 </paths>

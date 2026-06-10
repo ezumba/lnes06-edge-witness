@@ -1929,57 +1929,152 @@ class MainActivity : FragmentActivity() {
             attachmentJson: String,
         ) {
             lifecycleScope.launch(Dispatchers.IO) {
-                try {
-                    val timestamp = System.currentTimeMillis()
-                    // BLUE TEAM (M3): unique per-signature nonce defeats replay. The nonce
-                    // is folded into the signed byte-array AND sent in the body so the
-                    // Apex Router can reconstruct the exact payload to verify + dedupe.
-                    val nonceHex = newNonceHex()
-                    val payloadStr = "$message|$type|$lat|$lon|$radiusM|$ttlSecs|$groups|$category|$timestamp|$nonceHex"
-                    val signature  = ExergyStrongBox.signThermodynamicPayload(
-                        payloadStr.toByteArray(), ByteArray(0)
-                    )
-                    val sigB64 = android.util.Base64.encodeToString(signature, android.util.Base64.NO_WRAP)
-                    val ip = configManager.aggregatorIp.ifEmpty { "explorer-api.exergynet.org" }
-                    val bodyJson = JSONObject().apply {
-                        put("message",   message)
-                        put("type",      type)
-                        put("lat",       lat)
-                        put("lon",       lon)
-                        put("radius_m",  radiusM)
-                        put("ttl_secs",  ttlSecs)
-                        put("timestamp", timestamp)
-                        put("nonce",     nonceHex)
-                        put("signature", sigB64)
-                        put("miner_id",  configManager.getMinerId())
-                        put("category",  category.ifBlank { "INTEL" })
-                        if (groups.isNotBlank()) put("groups", groups)
-                        // Optional attachment (image inline base64; doc/video metadata only).
-                        try {
-                            val att = JSONObject(attachmentJson.ifBlank { "{}" })
-                            val b64 = att.optString("dataB64")
-                            if (b64.isNotEmpty()) {
-                                put("attachment_b64",  b64)
-                                put("attachment_mime", att.optString("mime", "image/jpeg"))
-                                put("attachment_name", att.optString("name", "attachment"))
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    val conn = URL("https://$ip/api/v1/drops/create").openConnection() as HttpURLConnection
+                // ── 1. SIGN ──────────────────────────────────────────────────────
+                val timestamp  = System.currentTimeMillis()
+                val nonceHex   = newNonceHex()
+                val payloadStr = "$message|$type|$lat|$lon|$radiusM|$ttlSecs|$groups|$category|$timestamp|$nonceHex"
+                val sigBytes   = try {
+                    ExergyStrongBox.signThermodynamicPayload(payloadStr.toByteArray(), ByteArray(0))
+                } catch (e: Exception) {
+                    sendToLog("[DROP] StrongBox sign failed: ${e.message}")
+                    withContext(Dispatchers.Main) { callJs("onDropSealFailed", "sign_error") }
+                    return@launch
+                }
+                val sigB64    = android.util.Base64.encodeToString(sigBytes, android.util.Base64.NO_WRAP)
+                val localId   = java.util.UUID.randomUUID().toString()
+                val minerId   = configManager.getMinerId()
+                val resolvedCategory = category.ifBlank { "INTEL" }
+
+                // ── 2. WRITE TO ROOM FIRST (offline survival guarantee) ──────────
+                val db  = ExergyDatabase.getDatabase(applicationContext)
+                val dao = db.ghostDropDao()
+                dao.insert(GhostDropEntity(
+                    localId        = localId,
+                    message        = message,
+                    type           = type,
+                    lat            = lat,
+                    lon            = lon,
+                    radiusM        = radiusM,
+                    ttlSecs        = ttlSecs,
+                    groups         = groups,
+                    category       = resolvedCategory,
+                    timestamp      = timestamp,
+                    nonceHex       = nonceHex,
+                    signature      = sigB64,
+                    minerId        = minerId,
+                    attachmentJson = attachmentJson.ifBlank { "" },
+                    syncStatus     = "PENDING",
+                    createdMs      = timestamp,
+                ))
+
+                // ── 3. ATTEMPT HTTPS TO L0 ROUTER ───────────────────────────────
+                val ip = configManager.aggregatorIp.ifEmpty { "explorer-api.exergynet.org" }
+                val bodyJson = JSONObject().apply {
+                    put("message",   message)
+                    put("type",      type)
+                    put("lat",       lat)
+                    put("lon",       lon)
+                    put("radius_m",  radiusM)
+                    put("ttl_secs",  ttlSecs)
+                    put("timestamp", timestamp)
+                    put("nonce",     nonceHex)
+                    put("signature", sigB64)
+                    put("miner_id",  minerId)
+                    put("category",  resolvedCategory)
+                    if (groups.isNotBlank()) put("groups", groups)
+                    try {
+                        val att = JSONObject(attachmentJson.ifBlank { "{}" })
+                        val b64 = att.optString("dataB64")
+                        if (b64.isNotEmpty()) {
+                            put("attachment_b64",  b64)
+                            put("attachment_mime", att.optString("mime", "image/jpeg"))
+                            put("attachment_name", att.optString("name", "attachment"))
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                val online = try {
+                    val conn = URL("https://$ip/api/v1/drops/create")
+                        .openConnection() as HttpURLConnection
                     conn.requestMethod = "POST"
                     conn.setRequestProperty("Content-Type", "application/json")
                     conn.doOutput = true
-                    conn.connectTimeout = 10000
-                    conn.readTimeout    = 15000
+                    conn.connectTimeout = 10_000
+                    conn.readTimeout    = 15_000
                     conn.outputStream.use { it.write(bodyJson.toString().toByteArray()) }
                     val respBody = conn.inputStream.bufferedReader().readText()
-                    val dropId   = try { JSONObject(respBody).optString("drop_id", "DROP-$timestamp") }
-                                   catch (_: Exception) { "DROP-$timestamp" }
-                    callJs("onDropSealed", dropId)
+                    val resp     = runCatching { JSONObject(respBody) }.getOrElse { JSONObject() }
+                    val dropId   = resp.optString("drop_id", "DROP-$timestamp")
+                    dao.markSynced(localId, dropId)
+                    // L0 may immediately return l2TxHash if the Siphon settled synchronously.
+                    val txHash   = resp.optString("l2_tx_hash", "")
+                    if (txHash.isNotBlank()) dao.setL2TxHash(localId, txHash)
+                    withContext(Dispatchers.Main) {
+                        callJs("onDropSealed", dropId)
+                        if (txHash.isNotBlank()) callJs("onDropAnchored", localId, txHash)
+                    }
+                    true
                 } catch (e: Exception) {
-                    sendToLog("[DROP] Seal failed: ${e.message}")
-                    callJs("onDropSealFailed", e.message ?: "unknown")
+                    sendToLog("[DROP] L0 unreachable (${e.message}) — activating offline survival membrane")
+                    false
                 }
+
+                if (!online) {
+                    // ── 4. MESH BROADCAST (DLTN viral relay) ────────────────────
+                    // Encode the full drop JSON into a drop_relay envelope and
+                    // broadcast to every known mesh peer. Any peer that has
+                    // connectivity will drain the queue via WorkManager.
+                    val svc = DLTNForegroundService.instance
+                    if (svc != null) {
+                        val dropRelayPayload = bodyJson.apply {
+                            put("local_id", localId)   // peers store with this ID to dedup
+                        }.toString()
+                        val contacts = db.dltnContactDao().getAllContacts()
+                        var relayCount = 0
+                        for (peer in contacts) {
+                            runCatching {
+                                svc.messenger.broadcastDrop(peer.nodeId, dropRelayPayload)
+                                relayCount++
+                            }
+                        }
+                        sendToLog("[DROP] Offline — relayed to $relayCount mesh peer(s)")
+                    } else {
+                        sendToLog("[DROP] Offline — no mesh service active, drop queued locally only")
+                    }
+
+                    // ── 5. ENQUEUE WORKMANAGER SYNC (fires on connectivity restore) ─
+                    DropSyncWorker.enqueue(applicationContext)
+
+                    // Report to UI as locally sealed; JS should surface an offline badge
+                    withContext(Dispatchers.Main) { callJs("onDropSealed", "LOCAL-$localId") }
+                }
+            }
+        }
+
+        // Called by JS for any drop that has a server drop_id but no l2TxHash yet.
+        // Polls /api/v1/drops/anchor and writes the hash to Room when the Siphon delivers it.
+        @JavascriptInterface
+        fun pollDropAnchor(localId: String, dropId: String) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    val ip  = configManager.aggregatorIp.ifEmpty { "explorer-api.exergynet.org" }
+                    val enc = java.net.URLEncoder.encode(dropId, "UTF-8")
+                    val conn = URL("https://$ip/api/v1/drops/anchor?drop_id=$enc")
+                        .openConnection() as HttpURLConnection
+                    conn.connectTimeout = 8_000
+                    conn.readTimeout    = 10_000
+                    val code = conn.responseCode
+                    if (code == 200) {
+                        val body   = conn.inputStream.bufferedReader().readText()
+                        val txHash = runCatching { JSONObject(body).optString("l2_tx_hash", "") }
+                            .getOrElse { "" }
+                        if (txHash.isNotBlank()) {
+                            val db = ExergyDatabase.getDatabase(applicationContext)
+                            db.ghostDropDao().setL2TxHash(localId, txHash)
+                            callJs("onDropAnchored", localId, txHash)
+                        }
+                    }
+                } catch (_: Exception) { /* Siphon not settled yet — JS should retry later */ }
             }
         }
 
@@ -2104,6 +2199,64 @@ class MainActivity : FragmentActivity() {
         private fun getDLTNService(): DLTNForegroundService? = DLTNForegroundService.instance
 
         // ── End DLTN Bridge ────────────────────────────────────────────────
+
+        // ── Self-Update ────────────────────────────────────────────────────
+        @JavascriptInterface
+        fun downloadLatestApk() {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    withContext(Dispatchers.Main) {
+                        callJs("onApkDownloadProgress", "downloading")
+                    }
+                    val apkDir = File(cacheDir, "apk_updates").apply { mkdirs() }
+                    val apkFile = File(apkDir, "ExergyNet-latest.apk")
+
+                    val conn = URL(DLTNConstants.APK_DOWNLOAD_URL).openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 15_000
+                    conn.readTimeout    = 120_000
+                    conn.connect()
+
+                    val total = conn.contentLengthLong
+                    var downloaded = 0L
+                    conn.inputStream.use { input ->
+                        apkFile.outputStream().use { output ->
+                            val buf = ByteArray(8192)
+                            var n: Int
+                            while (input.read(buf).also { n = it } != -1) {
+                                output.write(buf, 0, n)
+                                downloaded += n
+                                if (total > 0) {
+                                    val pct = (downloaded * 100 / total).toInt()
+                                    withContext(Dispatchers.Main) {
+                                        callJs("onApkDownloadProgress", "progress:$pct")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    val apkUri = androidx.core.content.FileProvider.getUriForFile(
+                        this@MainActivity,
+                        "${packageName}.fileprovider",
+                        apkFile
+                    )
+                    withContext(Dispatchers.Main) {
+                        callJs("onApkDownloadProgress", "installing")
+                        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(apkUri, "application/vnd.android.package-archive")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(installIntent)
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        callJs("onApkDownloadProgress", "error:${e.message}")
+                    }
+                }
+            }
+        }
+        // ── End Self-Update ────────────────────────────────────────────────
 
         // BLUE TEAM (M3): cryptographically-random 8-byte nonce (hex) for anti-replay
         // salting of StrongBox-signed payloads. SecureRandom here is correct usage —
