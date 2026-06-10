@@ -72,10 +72,29 @@ class WebRtcClient(
 
     // ── Public lifecycle ────────────────────────────────────────────────────
 
-    /** Wire renderers BEFORE start() so the first frames have a sink. */
+    /**
+     * Wire renderers. Safe to call before or after [start] and safe to call
+     * multiple times (e.g. when the Compose factory fires for the local preview
+     * after the remote surface was already wired).
+     *
+     * Each call removes the previous sink from each track before adding the new one,
+     * preventing the double-sink that caused permanent black screens on video
+     * upgrade (voice → video mid-call). [init] is also called here as a safeguard;
+     * if the factory already called it the exception is swallowed.
+     */
     fun setRenderers(local: SurfaceViewRenderer?, remote: SurfaceViewRenderer?) {
+        // Detach old sinks before reassigning so each track has exactly one sink.
+        if (local !== localRenderer) {
+            localRenderer?.let { old -> try { localVideoTrack?.removeSink(old) } catch (_: Exception) {} }
+        }
+        if (remote !== remoteRenderer) {
+            remoteRenderer?.let { old -> try { remoteVideoTrack?.removeSink(old) } catch (_: Exception) {} }
+        }
         localRenderer = local
         remoteRenderer = remote
+        // init() is idempotent from the caller's perspective — the "already initialized"
+        // exception is caught and ignored. The factory calls init() first; this is a
+        // belt-and-suspenders guarantee that the surface is ready before addSink.
         try { local?.init(rootEglBase.eglBaseContext, null) } catch (_: Exception) {}
         try { remote?.init(rootEglBase.eglBaseContext, null) } catch (_: Exception) {}
         localVideoTrack?.let { t -> local?.let { t.addSink(it) } }
@@ -155,6 +174,9 @@ class WebRtcClient(
                 val track = receiver?.track()
                 if (track is VideoTrack) {
                     remoteVideoTrack = track
+                    // If remoteRenderer is null here (Compose factory hasn't fired yet),
+                    // the track reference is stored; setRenderers() will addSink() it
+                    // when the factory confirms the surface is initialized.
                     remoteRenderer?.let { track.addSink(it) }
                     onRemoteVideo()
                 }
@@ -179,8 +201,14 @@ class WebRtcClient(
     // ── Local media (mic + front camera) ──────────────────────────────────────
 
     private fun addLocalMedia() {
-        // Audio
-        localAudioSource = factory.createAudioSource(MediaConstraints())
+        // Audio — enable AGC, noise suppression, echo cancellation for global calls.
+        val audioConstraints = MediaConstraints().apply {
+            mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("googAutoGainControl", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
+            mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
+        }
+        localAudioSource = factory.createAudioSource(audioConstraints)
         localAudioTrack = factory.createAudioTrack("dltn_audio", localAudioSource).apply { setEnabled(true) }
         peerConnection?.addTrack(localAudioTrack, listOf(STREAM_ID))
 

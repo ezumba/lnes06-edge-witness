@@ -58,8 +58,8 @@ object DLTNConstants {
     // A channel's importance is fixed at creation time and cannot be raised later,
     // so an "Active Call" state needs its own IMPORTANCE_HIGH channel rather than
     // mutating the low-importance relay channel.
-    const val DLTN_CALL_CHANNEL_ID   = "dltn_call_channel"
-    const val DLTN_CALL_CHANNEL_NAME = "Active Call"
+    const val DLTN_CALL_CHANNEL_ID   = "dltn_call_channel_v2"
+    const val DLTN_CALL_CHANNEL_NAME = "Incoming Call"
 
     // ── Voice Calls ───────────────────────────────────────────────────────────
     const val WIFI_AWARE_VOICE_PORT   = 7433
@@ -88,6 +88,16 @@ object DLTNConstants {
     const val MSG_TYPE_CALL_REJECT    = "call_reject"
     const val MSG_TYPE_CALL_END       = "call_end"
     const val CALL_NOTIFICATION_ID    = 43
+
+    // Self-update: APK served from the ExergyNet infrastructure.
+    const val APK_DOWNLOAD_URL = "https://explorer-api.exergynet.org/downloads/ExergyNet-latest.apk"
+
+    // LNES-10 Ghost Drop mesh relay — offline survival broadcast type.
+    // Content = base64(drop JSON). Any peer that receives this stores it
+    // locally and uploads via WorkManager when connectivity is restored.
+    const val MSG_TYPE_DROP_RELAY     = "drop_relay"
+    // Maximum upload attempts before a PENDING drop is abandoned.
+    const val DROP_SYNC_MAX_ATTEMPTS  = 10
 
     // ── AREM — Ambient RF Exploitation Module ────────────────────────────────
     const val AREM_CYCLE_MS           = 10_000L

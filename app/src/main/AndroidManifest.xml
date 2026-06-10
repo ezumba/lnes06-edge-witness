@@ -51,6 +51,9 @@
     <!-- Voice call audio routing -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- In-app APK self-update: allow install from our own FileProvider URI -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- AREM: cellular tower reading -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 

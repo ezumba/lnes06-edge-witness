@@ -14,8 +14,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DLTNMessageEntity::class,
         DLTNContactEntity::class,
         NodeBookEntity::class,
+        GhostDropEntity::class,
     ],
-    version = 6,
+    version = 8,
     exportSchema = false
 )
 abstract class ExergyDatabase : RoomDatabase() {
@@ -25,6 +26,7 @@ abstract class ExergyDatabase : RoomDatabase() {
     abstract fun dltnMessageDao(): DLTNMessageDao
     abstract fun dltnContactDao(): DLTNContactDao
     abstract fun nodeBookDao(): NodeBookDao
+    abstract fun ghostDropDao(): GhostDropDao
 
     companion object {
         @Volatile private var INSTANCE: ExergyDatabase? = null
@@ -82,6 +84,41 @@ abstract class ExergyDatabase : RoomDatabase() {
             }
         }
 
+        // LNES-10 Sprint Beta prep: l2TxHash column for Base L2 settlement receipt.
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE ghost_drops ADD COLUMN l2TxHash TEXT")
+            }
+        }
+
+        // LNES-10 Sprint Alpha: Ghost Drops offline survival table.
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS ghost_drops (
+                        localId       TEXT NOT NULL PRIMARY KEY,
+                        dropId        TEXT NOT NULL DEFAULT '',
+                        message       TEXT NOT NULL,
+                        type          TEXT NOT NULL,
+                        lat           REAL NOT NULL,
+                        lon           REAL NOT NULL,
+                        radiusM       INTEGER NOT NULL,
+                        ttlSecs       INTEGER NOT NULL,
+                        groups        TEXT NOT NULL DEFAULT '',
+                        category      TEXT NOT NULL DEFAULT 'INTEL',
+                        timestamp     INTEGER NOT NULL,
+                        nonceHex      TEXT NOT NULL,
+                        signature     TEXT NOT NULL,
+                        minerId       TEXT NOT NULL,
+                        attachmentJson TEXT NOT NULL DEFAULT '',
+                        syncStatus    TEXT NOT NULL DEFAULT 'PENDING',
+                        syncAttempts  INTEGER NOT NULL DEFAULT 0,
+                        createdMs     INTEGER NOT NULL
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun getDatabase(context: Context): ExergyDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -89,7 +126,7 @@ abstract class ExergyDatabase : RoomDatabase() {
                     ExergyDatabase::class.java,
                     "exergynet_database"
                 )
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .fallbackToDestructiveMigration()
                 .build()
                 INSTANCE = instance

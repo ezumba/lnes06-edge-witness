@@ -71,7 +71,11 @@ class DLTNCallEngine(
     private var serverSocket: ServerSocket? = null
     private var callSocket: Socket? = null
 
-    private var pendingCallerAddress = ""
+    // @Volatile ensures the latest address written by setRinging (IO coroutine) is
+    // always visible to acceptIncomingCall (UI thread). The value is captured into a
+    // local val at the top of acceptIncomingCall before any async work begins, so
+    // subsequent setRinging calls cannot corrupt an in-flight connection attempt.
+    @Volatile private var pendingCallerAddress = ""
     private var pendingLocalRenderer: SurfaceViewRenderer? = null
     private var pendingRemoteRenderer: SurfaceViewRenderer? = null
 
@@ -150,7 +154,7 @@ class DLTNCallEngine(
         }
 
         if (!callConnected.compareAndSet(false, true)) return
-        setCallState(CallState.CONNECTED, peerNodeId)
+        // addr captured before this point (local val above) — immune to concurrent setRinging.
         scope.launch {
             try {
                 val ip = addr.substringBeforeLast(':')
@@ -158,6 +162,9 @@ class DLTNCallEngine(
                 sendSignal(peerNodeId, DLTNConstants.MSG_TYPE_CALL_ACCEPT, "")
                 val socket = Socket(ip, port)
                 callSocket = socket
+                // CONNECTED is only asserted after the socket succeeds — no false
+                // "Connected" state while the TCP dial is still in flight or failing.
+                setCallState(CallState.CONNECTED, peerNodeId)
                 bindMedia(socket, isCaller = false)
             } catch (e: Exception) {
                 Log.e(TAG, "[CALL] accept connect failed: ${e.message}")
@@ -202,6 +209,13 @@ class DLTNCallEngine(
     ) {
         try {
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_VOICE_CALL,
+                audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
+                0
+            )
             val rtc = WebRtcClient(
                 context = context,
                 signaling = channel,
@@ -319,7 +333,12 @@ class DLTNCallEngine(
         try { callSocket?.close() } catch (_: Exception) {}
         try { serverSocket?.close() } catch (_: Exception) {}
         callSocket = null; serverSocket = null
-        try { audioManager.mode = AudioManager.MODE_NORMAL; audioManager.isSpeakerphoneOn = false } catch (_: Exception) {}
+        try {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(null)
+            audioManager.mode = AudioManager.MODE_NORMAL
+            audioManager.isSpeakerphoneOn = false
+        } catch (_: Exception) {}
         remotePeer = ""; pendingCallerAddress = ""
         _callState.value = CallState.IDLE
     }
