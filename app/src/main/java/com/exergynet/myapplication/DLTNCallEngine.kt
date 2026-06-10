@@ -17,6 +17,8 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -56,6 +58,16 @@ class DLTNCallEngine(
     @Volatile private var localVideoOn = false
     @Volatile private var remoteVideoSeen = false
     private fun recomputeVideo() { _videoActive.value = localVideoOn || remoteVideoSeen }
+
+    // Group room: null = 1:1, set = GRP_* room ID
+    @Volatile var activeRoomId: String? = null
+    // Map of peerId → (WebRtcClient, WsSignalingChannel) for group call participants
+    private val peerSessions = ConcurrentHashMap<String, Pair<WebRtcClient, WsSignalingChannel>>()
+    // Live list of group participant IDs exposed to the UI
+    private val _groupParticipants = MutableStateFlow<List<String>>(emptyList())
+    val groupParticipants: StateFlow<List<String>> = _groupParticipants
+    // Callback fired when a new remote participant joins (peerId) — UI inflates a new tile
+    var onParticipantAdded: ((peerId: String) -> Unit)? = null
 
     private var remotePeer = ""
     private val intentionalTeardown = AtomicBoolean(false)
@@ -184,7 +196,142 @@ class DLTNCallEngine(
 
     /** Feed an inbound WS WebRTC signaling frame (SDP/ICE) into the active call. */
     fun onGlobalRtcSignal(fromNodeId: String, rtcJson: String) {
-        activeWsChannel?.onRemote(rtcJson)
+        // Route to the correct peer session in a group call; fall back to 1:1 channel.
+        val groupChannel = peerSessions[fromNodeId]?.second
+        if (groupChannel != null) {
+            groupChannel.onRemote(rtcJson)
+        } else {
+            activeWsChannel?.onRemote(rtcJson)
+        }
+    }
+
+    // ── Group Call Upgrade ─────────────────────────────────────────────────────
+
+    /**
+     * Upgrade the current 1:1 call to a group call by adding [newPeerId].
+     * Steps:
+     *  1. Generate a GRP_ room ID.
+     *  2. POST join for all three parties (self, existing peer, new peer) via Apex Router.
+     *  3. Move existing WebRtcClient into peerSessions under remotePeer.
+     *  4. Dial a new WebRTC connection (as offerer) to newPeerId.
+     *  5. Notify the UI that a new participant tile should appear.
+     */
+    fun upgradeToGroupCall(
+        newPeerId: String,
+        myNodeId: String,
+        globalMesh: GlobalMeshService,
+        remoteRendererForNew: SurfaceViewRenderer?,
+    ) {
+        if (_callState.value != CallState.CONNECTED) return
+        val roomId = "GRP_" + UUID.randomUUID().toString().take(8).uppercase()
+        activeRoomId = roomId
+        Log.i(TAG, "[GROUP] Upgrading to group call room=$roomId new=$newPeerId")
+
+        // Join all three to the room
+        globalMesh.joinGroup(roomId, myNodeId)
+        globalMesh.joinGroup(roomId, remotePeer)
+        globalMesh.joinGroup(roomId, newPeerId)
+
+        // Move the existing 1:1 client into peerSessions (keep it alive)
+        val existingRtc = webRtc
+        val existingChannel = activeWsChannel
+        if (existingRtc != null && existingChannel != null) {
+            peerSessions[remotePeer] = Pair(existingRtc, existingChannel)
+            webRtc = null
+            activeWsChannel = null
+        }
+
+        // Invite the new peer via group room envelope
+        scope.launch {
+            val invitePayload = org.json.JSONObject()
+                .put("room_id", roomId)
+                .put("inviter", myNodeId)
+                .put("peers", org.json.JSONArray().put(remotePeer).put(newPeerId))
+                .toString()
+            val inviteBytes = invitePayload.toByteArray(Charsets.UTF_8)
+            globalMesh.sendSignalEnvelope(newPeerId, buildGroupInviteEnvelope(myNodeId, newPeerId, roomId, invitePayload))
+        }
+
+        // Open a new WebRTC peer connection to newPeerId (we are the offerer)
+        val ws = WsSignalingChannel(out = { json ->
+            globalMesh.sendRtcSignal(newPeerId, json)
+        })
+        val rtc = buildPeerWebRtcClient(ws, isCaller = true, remoteRenderer = remoteRendererForNew)
+        peerSessions[newPeerId] = Pair(rtc, ws)
+        rtc.start()
+
+        // Update participant list for UI
+        _groupParticipants.value = peerSessions.keys.toList()
+        onParticipantAdded?.invoke(newPeerId)
+    }
+
+    /** Accept an incoming group invite from a peer. Called when a group_invite message arrives. */
+    fun onGroupInviteReceived(
+        fromPeerId: String,
+        roomId: String,
+        myNodeId: String,
+        globalMesh: GlobalMeshService,
+        remoteRenderer: SurfaceViewRenderer?,
+    ) {
+        if (_callState.value != CallState.CONNECTED) return
+        activeRoomId = roomId
+        Log.i(TAG, "[GROUP] Joining group room=$roomId from=$fromPeerId")
+
+        globalMesh.joinGroup(roomId, myNodeId)
+
+        val ws = WsSignalingChannel(out = { json ->
+            globalMesh.sendRtcSignal(fromPeerId, json)
+        })
+        val rtc = buildPeerWebRtcClient(ws, isCaller = false, remoteRenderer = remoteRenderer)
+        peerSessions[fromPeerId] = Pair(rtc, ws)
+        rtc.start()
+
+        _groupParticipants.value = peerSessions.keys.toList()
+        onParticipantAdded?.invoke(fromPeerId)
+    }
+
+    private fun buildPeerWebRtcClient(
+        channel: WsSignalingChannel,
+        isCaller: Boolean,
+        remoteRenderer: SurfaceViewRenderer?,
+    ): WebRtcClient {
+        val rtc = WebRtcClient(
+            context = context,
+            signaling = channel,
+            isCaller = isCaller,
+            eglBase = eglBase,
+            iceServers = listOf(
+                PeerConnection.IceServer.builder(DLTNConstants.TURN_URI)
+                    .setUsername(DLTNConstants.TURN_USERNAME)
+                    .setPassword(DLTNConstants.TURN_PASSWORD)
+                    .createIceServer()
+            ),
+            onConnectionStateChange = { state ->
+                if (state == PeerConnection.IceConnectionState.FAILED ||
+                    state == PeerConnection.IceConnectionState.DISCONNECTED) {
+                    Log.w(TAG, "[GROUP] Peer connection dropped ($state)")
+                }
+            },
+            onRemoteVideo = { remoteVideoSeen = true; recomputeVideo() },
+        )
+        rtc.setRenderers(null, remoteRenderer)
+        if (localVideoOn) rtc.setVideoEnabled(true)
+        return rtc
+    }
+
+    private fun buildGroupInviteEnvelope(
+        fromId: String, toId: String, roomId: String, payload: String,
+    ): ByteArray {
+        val obj = org.json.JSONObject()
+            .put("id", UUID.randomUUID().toString())
+            .put("type", DLTNConstants.MSG_TYPE_GROUP_INVITE)
+            .put("from_node_id", fromId)
+            .put("to_node_id", toId)
+            .put("content", android.util.Base64.encodeToString(
+                payload.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP))
+            .put("timestamp", System.currentTimeMillis())
+            .put("signature", "")   // unsigned — group invite is trusted on receipt
+        return obj.toString().toByteArray(Charsets.UTF_8)
     }
 
     // ── WebRTC media binding ────────────────────────────────────────────────────
@@ -259,14 +406,27 @@ class DLTNCallEngine(
         webRtc?.setRenderers(local, remote)
     }
 
-    fun setMuted(muted: Boolean) { webRtc?.setMuted(muted) }
+    /** Register a remote SurfaceViewRenderer for a specific group participant. */
+    fun setParticipantRenderer(peerId: String, renderer: SurfaceViewRenderer?) {
+        peerSessions[peerId]?.first?.setRenderers(null, renderer)
+    }
+
+    fun setMuted(muted: Boolean) {
+        webRtc?.setMuted(muted)
+        peerSessions.values.forEach { (rtc, _) -> rtc.setMuted(muted) }
+    }
     fun setSpeakerphoneOn(on: Boolean) { try { audioManager.isSpeakerphoneOn = on } catch (_: Exception) {} }
     fun setVideoEnabled(enabled: Boolean) {
         localVideoOn = enabled
         webRtc?.setVideoEnabled(enabled)
+        peerSessions.values.forEach { (rtc, _) -> rtc.setVideoEnabled(enabled) }
         recomputeVideo()
     }
-    fun switchCamera() { webRtc?.switchCamera() }
+    fun switchCamera() {
+        webRtc?.switchCamera()
+        // Only one camera capturer exists per process — switching on the primary
+        // WebRtcClient flips the camera for all sessions sharing the same device.
+    }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────────
 
@@ -330,6 +490,11 @@ class DLTNCallEngine(
         try { webRtc?.close() } catch (_: Exception) {}
         webRtc = null
         activeWsChannel = null
+        // Close all group peer sessions
+        peerSessions.values.forEach { (rtc, _) -> try { rtc.close() } catch (_: Exception) {} }
+        peerSessions.clear()
+        _groupParticipants.value = emptyList()
+        activeRoomId = null
         try { callSocket?.close() } catch (_: Exception) {}
         try { serverSocket?.close() } catch (_: Exception) {}
         callSocket = null; serverSocket = null

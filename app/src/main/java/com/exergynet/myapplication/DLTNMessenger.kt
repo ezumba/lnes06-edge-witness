@@ -106,6 +106,30 @@ class DLTNMessenger(
     suspend fun sendCallReject(toNodeId: String) = sendSignal(toNodeId, DLTNConstants.MSG_TYPE_CALL_REJECT)
     suspend fun sendCallEnd(toNodeId: String)    = sendSignal(toNodeId, DLTNConstants.MSG_TYPE_CALL_END)
 
+    // ── Group Chat ────────────────────────────────────────────────────────────
+
+    /**
+     * Send a message to a GRP_CHAT_* room. The Apex Router fans it out to all
+     * members registered to that room. Stored locally as a normal text message
+     * with toNodeId = roomId so the conversation view can group them.
+     */
+    suspend fun sendGroupMessage(roomId: String, content: String): DLTNMessageEntity {
+        val msg = composeMessage(
+            toNodeId = roomId,
+            type     = DLTNConstants.MSG_TYPE_GROUP_CHAT,
+            content  = Base64.encodeToString(content.toByteArray(Charsets.UTF_8), Base64.NO_WRAP),
+        )
+        db.dltnMessageDao().insert(msg)
+        Log.i(TAG, "[GROUP_CHAT] → $roomId")
+        try { globalSend?.invoke(roomId, buildEnvelopeBytes(msg)) } catch (_: Exception) {}
+        return msg
+    }
+
+    /** Send a group_invite signal to a specific peer so they can join [roomId]. */
+    suspend fun sendGroupInvite(toNodeId: String, roomId: String, invitePayload: String): DLTNMessageEntity {
+        return sendSignal(toNodeId, DLTNConstants.MSG_TYPE_GROUP_INVITE, invitePayload)
+    }
+
     private suspend fun sendSignal(toNodeId: String, type: String, payload: String = ""): DLTNMessageEntity {
         val body = payload.ifEmpty { type }
         val msg = composeMessage(
@@ -217,13 +241,13 @@ class DLTNMessenger(
                 return   // drop_relay is not surfaced in the chat UI
             }
 
-            // Route call signals to CallEngine via callback — pass decoded content
-            // so the receiver can extract caller IP:port from call_invite payload.
+            // Route call signals (and group invite) to CallEngine via callback.
             if (msgType in listOf(
                 DLTNConstants.MSG_TYPE_CALL_INVITE,
                 DLTNConstants.MSG_TYPE_CALL_ACCEPT,
                 DLTNConstants.MSG_TYPE_CALL_REJECT,
                 DLTNConstants.MSG_TYPE_CALL_END,
+                DLTNConstants.MSG_TYPE_GROUP_INVITE,
             )) {
                 val decodedContent = try {
                     String(Base64.decode(msg.content, Base64.NO_WRAP), Charsets.UTF_8)

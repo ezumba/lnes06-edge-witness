@@ -92,6 +92,11 @@ object DLTNConstants {
     // Self-update: APK served from the ExergyNet infrastructure.
     const val APK_DOWNLOAD_URL = "https://explorer-api.exergynet.org/downloads/ExergyNet-latest.apk"
 
+    // LNES-12 Group Relay — multi-party room management.
+    const val MSG_TYPE_GROUP_INVITE     = "group_invite"   // invite peers to a GRP_ room
+    const val MSG_TYPE_GROUP_CHAT       = "group_chat"     // text message addressed to a room
+    const val APEX_BASE_URL             = "https://explorer-api.exergynet.org"
+
     // LNES-10 Ghost Drop mesh relay — offline survival broadcast type.
     // Content = base64(drop JSON). Any peer that receives this stores it
     // locally and uploads via WorkManager when connectivity is restored.
