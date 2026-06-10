@@ -49,6 +49,14 @@ class DLTNCallEngine(
     /** Observed by CallScreen. */
     val callState: StateFlow<CallState> = _callState
 
+    // True when local video is on OR the remote peer is sending video → the UI
+    // switches from the voice avatar layout to full-screen video.
+    private val _videoActive = MutableStateFlow(false)
+    val videoActive: StateFlow<Boolean> = _videoActive
+    @Volatile private var localVideoOn = false
+    @Volatile private var remoteVideoSeen = false
+    private fun recomputeVideo() { _videoActive.value = localVideoOn || remoteVideoSeen }
+
     private var remotePeer = ""
     private val intentionalTeardown = AtomicBoolean(false)
     private val callConnected = AtomicBoolean(false)
@@ -75,10 +83,13 @@ class DLTNCallEngine(
 
     // ── Outgoing ───────────────────────────────────────────────────────────────
 
-    fun startOutgoingCall(peerNodeId: String) {
+    @Volatile private var pendingStartVideo = false
+
+    fun startOutgoingCall(peerNodeId: String, withVideo: Boolean = false) {
         if (_callState.value != CallState.IDLE) return
         intentionalTeardown.set(false)
         callConnected.set(false)
+        pendingStartVideo = withVideo
 
         val localIp = getLocalNetworkIp()
         val globalRail = globalUp()
@@ -203,11 +214,16 @@ class DLTNCallEngine(
                         if (!intentionalTeardown.get()) handleDrop()
                     }
                 },
+                onRemoteVideo = { remoteVideoSeen = true; recomputeVideo() },
             )
             rtc.setRenderers(pendingLocalRenderer, pendingRemoteRenderer)
             rtc.start()
             webRtc = rtc
-            Log.i(TAG, "[CALL] WebRTC media started (caller=$isCaller, ice=${iceServers.size})")
+            // If the caller dialed a VIDEO call, turn the camera on once media is up.
+            if (isCaller && pendingStartVideo) {
+                localVideoOn = true; rtc.setVideoEnabled(true); recomputeVideo()
+            }
+            Log.i(TAG, "[CALL] WebRTC media started (caller=$isCaller, ice=${iceServers.size}, video=$pendingStartVideo)")
         } catch (e: Exception) {
             Log.e(TAG, "[CALL] WebRTC bind failed: ${e.message}")
             endCall()
@@ -231,7 +247,11 @@ class DLTNCallEngine(
 
     fun setMuted(muted: Boolean) { webRtc?.setMuted(muted) }
     fun setSpeakerphoneOn(on: Boolean) { try { audioManager.isSpeakerphoneOn = on } catch (_: Exception) {} }
-    fun setVideoEnabled(enabled: Boolean) { webRtc?.setVideoEnabled(enabled) }
+    fun setVideoEnabled(enabled: Boolean) {
+        localVideoOn = enabled
+        webRtc?.setVideoEnabled(enabled)
+        recomputeVideo()
+    }
     fun switchCamera() { webRtc?.switchCamera() }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -291,6 +311,8 @@ class DLTNCallEngine(
 
     private fun cleanup() {
         callConnected.set(false)
+        pendingStartVideo = false
+        localVideoOn = false; remoteVideoSeen = false; _videoActive.value = false
         try { webRtc?.close() } catch (_: Exception) {}
         webRtc = null
         activeWsChannel = null
