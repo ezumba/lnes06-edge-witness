@@ -13,3 +13,6 @@
 .externalNativeBuild
 .cxx
 local.properties
+# Compiled APKs — served from server, not tracked in git
+**/*.apk
+app/release/baselineProfiles/
