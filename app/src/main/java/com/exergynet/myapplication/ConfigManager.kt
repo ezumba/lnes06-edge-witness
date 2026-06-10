@@ -90,10 +90,8 @@ class ConfigManager(context: Context) {
         return regex.matches(address)
     }
 
-    fun getMinerId(): String {
-        return prefs.getString("miner_id", null) ?: android.provider.Settings.Secure.getString(
-            appCtx.contentResolver,
-            android.provider.Settings.Secure.ANDROID_ID
-        ) ?: "unknown_node"
-    }
+    // Canonical node id == the mesh identity (Base64(SHA-256(pubkey))). Previously
+    // this returned ANDROID_ID (hex), which disagreed with the mesh's pubkey-hash id
+    // and broke all routing + D2 verification. Now both are the same value.
+    fun getMinerId(): String = NodeIdentity.get(appCtx)
 }

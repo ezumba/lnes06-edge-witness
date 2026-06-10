@@ -15,6 +15,8 @@
          direct TCP. Needs no dangerous runtime permission (unlike BLE). -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Ring with the native call UI over the lock screen (incoming calls). -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- BLUE TEAM (H4): READ_CONTACTS + CALL_PHONE removed alongside the pruned
          getPhoneContacts / makePhoneCall bridge methods. ExergyNet is a compute and
          sensor verification network, not a telephony dialer. -->
@@ -89,6 +91,17 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Native A/V call UI (hosts WebRTC SurfaceViewRenderers — the WebView
+             cannot render WebRTC video). Launched by DLTNForegroundService on
+             RINGING/CALLING; rings over the lock screen. -->
+        <activity
+            android:name=".CallActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
 
         <!-- DLTN Mesh Relay Foreground Service -->
         <service

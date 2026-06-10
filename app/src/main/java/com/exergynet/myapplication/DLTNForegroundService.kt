@@ -249,7 +249,15 @@ class DLTNForegroundService : Service() {
         when (state) {
             DLTNCallEngine.CallState.RINGING,
             DLTNCallEngine.CallState.CALLING,
-            DLTNCallEngine.CallState.CONNECTED -> startCallForeground(peer)
+            DLTNCallEngine.CallState.CONNECTED -> {
+                startCallForeground(peer)
+                // Surface the NATIVE call UI (the WebView cannot render WebRTC
+                // video). Best-effort: on Android 10+ background-activity-start
+                // may be blocked unless we're foreground/FGS-eligible; the
+                // full-screen notification below is the fallback ring path.
+                try { CallActivity.launch(this) }
+                catch (e: Exception) { Log.w(TAG, "[CALL] CallActivity launch blocked: ${e.message}") }
+            }
             DLTNCallEngine.CallState.ENDED,
             DLTNCallEngine.CallState.IDLE      -> endCallForeground()
         }
@@ -300,6 +308,11 @@ class DLTNForegroundService : Service() {
     }
 
     private fun endCallForeground() {
+        // Dismiss the ringing full-screen notification if it's still up.
+        try {
+            getSystemService(NotificationManager::class.java)
+                .cancel(DLTNConstants.CALL_NOTIFICATION_ID)
+        } catch (_: Exception) {}
         // Drop back to the ongoing low-importance relay notification. Relay never
         // uses the mic, so it is always CONNECTED_DEVICE only — explicitly typed so
         // we never implicitly inherit the manifest's microphone type here.
@@ -337,16 +350,23 @@ class DLTNForegroundService : Service() {
     }
 
     private fun showIncomingCallNotification(fromNodeId: String) {
-        val intent = packageManager.getLaunchIntentForPackage(packageName)
+        // Full-screen intent → CallActivity. This is the OS-sanctioned way to ring:
+        // when the device is locked/idle the native call UI is shown directly; when
+        // unlocked, a heads-up notification appears and tapping opens CallActivity.
+        val callIntent = Intent(this, CallActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
         val pi = PendingIntent.getActivity(
-            this, 0, intent,
+            this, 0, callIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val notif = Notification.Builder(this, DLTNConstants.DLTN_NOTIFICATION_CHANNEL_ID)
+        val notif = Notification.Builder(this, DLTNConstants.DLTN_CALL_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentTitle("Incoming Call")
             .setContentText("From node ${fromNodeId.take(8)}")
             .setContentIntent(pi)
+            .setFullScreenIntent(pi, true)
+            .setCategory(Notification.CATEGORY_CALL)
             .setAutoCancel(true)
             .build()
         getSystemService(NotificationManager::class.java)
